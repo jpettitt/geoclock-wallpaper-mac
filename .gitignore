@@ -1,0 +1,28 @@
+# Xcode project is generated from project.yml via XcodeGen — never
+# commit it. Anyone cloning runs `xcodegen generate` to recreate.
+*.xcodeproj/
+
+# Xcode user-specific bits that don't belong in source control.
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+*.xcworkspace/xcuserdata/
+DerivedData/
+build/
+
+# Swift Package Manager (in case anyone ever adds a Package.swift
+# for a CLI tool or shared lib here).
+.swiftpm/
+.build/
+Package.resolved
+
+# Local environment / secrets — codesign identities, App Store
+# Connect keys, etc. live here per developer.
+.env
+.env.*
+*.p12
+*.cer
+AuthKey_*.p8
+
+# macOS junk.
+.DS_Store

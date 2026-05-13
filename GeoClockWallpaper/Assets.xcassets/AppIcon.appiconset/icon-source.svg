@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Source SVG for the macOS app icon. PNGs are rendered from
+       this file at every required size via rsvg-convert (see
+       generate-icons.sh). Design mirrors geoclock.world's favicon
+       — same two-tone globe + tilted terminator — but sits on a
+       dark rounded-square background per the Big Sur+ icon
+       template. -->
+
+  <!-- Big Sur-style rounded-square bezel. macOS automatically
+       round-clips icons, but supplying the rounded shape ourselves
+       gives us full control of the corner radius (Apple's
+       template radius is roughly 180/1024 = 17.6%). -->
+  <rect x="0" y="0" width="1024" height="1024" rx="180" ry="180"
+        fill="#0c1118"/>
+
+  <!-- Globe — night side -->
+  <circle cx="512" cy="512" r="380" fill="#1a3a5e"/>
+
+  <!-- Day half, tilted ≈Earth's axial tilt for visual interest -->
+  <g transform="rotate(-23 512 512)">
+    <path d="M 512 132 A 380 380 0 0 0 512 892 Z" fill="#ff7a3d"/>
+  </g>
+</svg>
