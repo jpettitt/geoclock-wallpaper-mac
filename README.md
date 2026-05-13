@@ -14,10 +14,26 @@ time-source overrides, theming) flow in for free.
 
 ## Status
 
-Alpha — minimum-viable "first wallpaper renders on launch + every
-5 min" loop. Not yet signed/notarized.
+**v0.1.0-alpha** — first signed + notarized public release.
+Architecture, config schema, and persisted-settings layout are
+still settling, so expect breaking changes between alpha versions.
 
-## Build
+## Install
+
+Grab `GeoClockWallpaper.zip` from the
+[v0.1.0-alpha release](https://github.com/jpettitt/geoclock-wallpaper-mac/releases/tag/v0.1.0-alpha),
+unzip it, and drag `GeoClockWallpaper.app` into `/Applications`.
+Signed with a Developer ID certificate and notarized by Apple, so
+macOS launches it directly — no Gatekeeper "unidentified
+developer" warning, no `xattr -d` dance.
+
+Requires macOS 13.0 or later. Universal binary — Intel and Apple
+Silicon both supported. On first launch the app appears as a 🌍 in
+the menu bar (no Dock icon, `LSUIElement = YES`). Use the menu's
+**Settings…** entry to configure markers, refresh cadence, home
+marker, and aspect-fit mode.
+
+## Build from source
 
 You'll need [XcodeGen](https://github.com/yonaskolb/XcodeGen) to
 generate the `.xcodeproj` from `project.yml`:
