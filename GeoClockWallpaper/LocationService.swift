@@ -120,6 +120,20 @@ final class LocationService: NSObject, ObservableObject {
       "ts": Date().timeIntervalSince1970,
     ], forKey: cacheKey)
   }
+
+  /// Wipe the in-memory + on-disk last-known coordinate. Used
+  /// by `ConfigStore.resetToDefaults` so a "Reset" actually
+  /// clears the home dot's position too — the cached fix
+  /// otherwise survives every config reset and the home marker
+  /// keeps drawing at the location the user might be trying
+  /// to forget. CoreLocation will refresh the coordinate the
+  /// next time it has authorization; until then `coordinate`
+  /// is nil and overlay views fall back to the TZ-centroid or
+  /// hide the home marker entirely.
+  func clearCachedFix() {
+    coordinate = nil
+    defaults.removeObject(forKey: cacheKey)
+  }
 }
 
 // MARK: – CLLocationManagerDelegate

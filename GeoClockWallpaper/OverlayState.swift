@@ -22,12 +22,19 @@ final class OverlayState: ObservableObject {
 
   // MARK: – Inputs from elsewhere
 
-  /// Last centerLon a wallpaper render committed to. The
-  /// overlay projects markers against this — keeping it
-  /// synced with the wallpaper means a marker dot in the
-  /// overlay sits exactly over the (now-hidden) dot the card
-  /// would have drawn.
+  /// Last centerLon a wallpaper render committed to (global /
+  /// single-display path). The overlay projects markers against
+  /// this — keeping it synced with the wallpaper means a marker
+  /// dot in the overlay sits exactly over the (now-hidden) dot
+  /// the card would have drawn.
   @Published var currentCenterLon: Double = 0
+
+  /// Per-display center longitudes — one per rendered screen so
+  /// each overlay projects its markers against the centerLon
+  /// the wallpaper for THAT screen was drawn at. Falls back to
+  /// `currentCenterLon` when a display has no entry yet (first
+  /// render in progress).
+  @Published var centerLonsByDisplay: [CGDirectDisplayID: Double] = [:]
 
   /// Aspect-fit mode (Stretch / Letterbox / Crop overflow).
   /// Determines stage-2 projection.
@@ -112,17 +119,35 @@ final class OverlayState: ObservableObject {
   /// while the wallpaper itself shows a different view.
   @Published var hasInitialRender: Bool = false
 
-  /// The wallpaper bitmap painted as the overlay window's
-  /// background layer. Replaces the prior path of writing a
-  /// PNG to disk and handing it to `NSWorkspace.setDesktopImageURL`
-  /// — by painting the same image we hand to AppKit *inside* the
-  /// overlay window, the image and the marker overlay share one
-  /// coordinate system (the window's own bounds), so a marker
-  /// dot lands exactly on the pixel where the PNG would have
-  /// drawn the underlying city. Nil means "no render yet" — the
-  /// view falls back to a black background until the first
-  /// snapshot arrives.
-  @Published var wallpaperImage: NSImage?
+  /// Per-display rendered wallpaper bitmaps, keyed by
+  /// `CGDirectDisplayID`. Each overlay window looks up its own
+  /// image so a multi-monitor setup with different aspect
+  /// ratios isn't forced to crop one render across every screen.
+  /// Empty until the first per-screen render lands.
+  @Published var wallpaperImages: [CGDirectDisplayID: NSImage] = [:]
+
+  /// Set of display UUID strings the user has opted to NOT
+  /// render the wallpaper on. We persist UUIDs (via
+  /// `DisplayIdentity.uuidString(forID:)`) because the
+  /// `CGDirectDisplayID` value can shift across reboots when
+  /// multiple monitors are connected.
+  @Published var disabledDisplays: Set<String> = []
+
+  /// Full snapshot of the latest `WallpaperConfig`. Mirrors the
+  /// individual flat `@Published` fields above (kept for
+  /// readability in views that don't need the per-display
+  /// override system), and gives views that DO need it access
+  /// to `perDisplaySettings` for `resolvedConfig(forScreen:)`.
+  @Published var config: WallpaperConfig = .defaults
+
+  /// UUID of the display the Settings window is currently
+  /// presented on. Nil when Settings is closed. Drives two
+  /// behaviours: the "This display" tab in Settings shows
+  /// PerDisplayConfigView for this UUID, and
+  /// `PerDisplayPanelManager` suppresses the floating panel
+  /// for whichever display Settings is occupying so the user
+  /// never sees the same controls twice.
+  @Published var settingsWindowDisplayUUID: String?
 
   // MARK: – Init
 
@@ -149,7 +174,18 @@ final class OverlayState: ObservableObject {
     if !hasInitialRender { hasInitialRender = true }
   }
 
+  /// Resolve the config a specific overlay should render with.
+  /// Folds the per-display overrides keyed by the screen's UUID
+  /// onto the global config. Falls back to the global config
+  /// when per-display mode is off, the screen has no UUID, or
+  /// the screen has no per-display entry.
+  func resolvedConfig(forScreen screen: NSScreen) -> WallpaperConfig {
+    let uuid = DisplayIdentity.uuidString(of: screen)
+    return config.resolved(forDisplay: uuid)
+  }
+
   func applyConfig(_ cfg: WallpaperConfig) {
+    config = cfg
     aspectFit = cfg.aspectFit
     showTimezoneBand = cfg.showTimezoneBand
     markers = cfg.markers
@@ -161,6 +197,7 @@ final class OverlayState: ObservableObject {
     homeLabel = cfg.homeLabel
     homeDayColor = cfg.homeDayColor
     homeNightColor = cfg.homeNightColor
+    disabledDisplays = Set(cfg.disabledDisplays)
     clockPosition = cfg.clockPosition
     clockSource = cfg.clockSource
     manualTimezone = cfg.manualTimezone

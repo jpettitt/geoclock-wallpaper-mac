@@ -62,21 +62,32 @@ final class WallpaperRenderer: NSObject {
   /// agrees because the aspect ratio matches.
   private var renderSize = NSSize(width: 1920, height: 1080)
 
-  /// Recompute `renderSize` from the main screen. Called at
-  /// the top of every render so display reconfigurations
-  /// (resolution change, monitor swap) are reflected on the
-  /// next tick without restarting the app.
+  /// Per-call screen-size override. When set by the public
+  /// `render(forSize:...)` entry point, `updateRenderSize()`
+  /// uses this instead of `NSScreen.main` — that's how we
+  /// render once per physical display in a multi-monitor setup.
+  /// Cleared after each render so a subsequent caller using the
+  /// no-arg `render()` falls back to the main-screen default.
+  private var pendingScreenSize: NSSize?
+
+  /// Recompute `renderSize` for the current target. Pulls from
+  /// `pendingScreenSize` (set by the caller for per-screen
+  /// rendering) when present, else from `NSScreen.main` so
+  /// single-display setups keep working without changes. The
+  /// 2048-pt width cap protects 5K / 6K snapshot budgets — we
+  /// scale down proportionally and let the overlay rescale.
   private func updateRenderSize() {
-    let main = NSScreen.main?.frame.size
+    let target = pendingScreenSize
+      ?? NSScreen.main?.frame.size
       ?? NSSize(width: 1920, height: 1080)
     let maxWidth: CGFloat = 2048
-    if main.width <= maxWidth {
-      renderSize = main
+    if target.width <= maxWidth {
+      renderSize = target
     } else {
-      let scale = maxWidth / main.width
+      let scale = maxWidth / target.width
       renderSize = NSSize(
         width: maxWidth,
-        height: (main.height * scale).rounded())
+        height: (target.height * scale).rounded())
     }
   }
 
@@ -138,6 +149,7 @@ final class WallpaperRenderer: NSObject {
   /// flight, this one is dropped and the completion is invoked
   /// with `.alreadyInFlight`.
   func render(
+    forSize size: NSSize? = nil,
     config: WallpaperConfig,
     payload: (config: [String: Any], hass: [String: Any]),
     completion: @escaping (Result<RenderOutput, RenderError>) -> Void
@@ -150,6 +162,11 @@ final class WallpaperRenderer: NSObject {
       }
       self.inFlight = true
       self.pendingCompletion = completion
+      // Per-screen rendering: caller passes the destination
+      // display's size so updateRenderSize() targets that screen
+      // instead of NSScreen.main. nil means "use main" — the
+      // single-display compatibility path.
+      self.pendingScreenSize = size
       // CSS hides the card's clock + markers (handled by the
       // Swift overlay) and removes the card's inline
       // aspect-ratio so the SVG can fill the card host.
@@ -715,6 +732,7 @@ final class WallpaperRenderer: NSObject {
     let completion = pendingCompletion
     pendingCompletion = nil
     inFlight = false
+    pendingScreenSize = nil
 
     // We DON'T tear down the WebView between successful renders
     // anymore — keeping the loaded page around means the next

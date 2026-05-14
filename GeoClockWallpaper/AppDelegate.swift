@@ -27,6 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   /// the AppDelegate's Combine subscriptions can drive it.
   private let overlayState = OverlayState()
   private var overlayLayer: OverlayLayer?
+  /// Manages the per-display floating config panels (one panel
+  /// per enabled display while `perDisplayEnabled` is true).
+  private var perDisplayPanels: PerDisplayPanelManager?
   /// Held strong so the Settings window survives across opens.
   /// `isReleasedWhenClosed = false` would suffice if we recreated
   /// on every open, but keeping the same window preserves user
@@ -36,6 +39,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     setupStatusItem()
     overlayLayer = OverlayLayer(state: overlayState)
+    perDisplayPanels = PerDisplayPanelManager(
+      store: config, overlayState: overlayState)
+
+    // PerDisplayPanelManager posts this when any aux panel is
+    // closed, so Settings dismisses with the rest of the
+    // config surface instead of stranding the user with the
+    // master window after they X'd a panel.
+    NotificationCenter.default.addObserver(
+      forName: .closeSettingsWindow,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.settingsWindow?.performClose(nil)
+    }
     overlayState.menuBarHeight =
       Double(WallpaperRenderer.maxMenuBarHeight())
 
@@ -260,7 +277,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       // `.environmentObject` here so the bindings inside the form
       // resolve correctly.
       let hosting = NSHostingController(
-        rootView: SettingsView().environmentObject(config))
+        rootView: SettingsView()
+          .environmentObject(config)
+          .environmentObject(overlayState))
       let window = NSWindow(contentViewController: hosting)
       window.title = "GeoClock Wallpaper Settings"
       window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -276,6 +295,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                             // flip back on close.
     NSApp.activate(ignoringOtherApps: true)
     settingsWindow?.makeKeyAndOrderFront(nil)
+    publishSettingsWindowScreen()
+    // Re-open any per-display panels the user closed manually.
+    // Without this, after a close-all cascade the panels would
+    // only come back on a toggle-off-then-on of the master
+    // switch, which felt like a bug.
+    perDisplayPanels?.showAllPanels()
 
     // Pre-warm the renderer while the user is finding their way
     // around Settings. By the time they tweak something, the
@@ -292,7 +317,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   func windowWillClose(_ notification: Notification) {
     if let w = notification.object as? NSWindow, w === settingsWindow {
       NSApp.setActivationPolicy(.accessory)
+      overlayState.settingsWindowDisplayUUID = nil
     }
+  }
+
+  /// NSWindowDelegate hook: the Settings window jumped to a
+  /// different display. Re-publish the new display's UUID so
+  /// the "This display" tab in Settings re-targets that screen
+  /// and `PerDisplayPanelManager` closes the panel there
+  /// (and reopens the panel for the screen Settings just left).
+  func windowDidChangeScreen(_ notification: Notification) {
+    guard
+      let w = notification.object as? NSWindow,
+      w === settingsWindow
+    else { return }
+    publishSettingsWindowScreen()
+  }
+
+  /// Resolve the Settings window's current display UUID and
+  /// publish it on `overlayState`. Called on open and on
+  /// `windowDidChangeScreen`.
+  private func publishSettingsWindowScreen() {
+    guard let screen = settingsWindow?.screen else {
+      overlayState.settingsWindowDisplayUUID = nil
+      return
+    }
+    overlayState.settingsWindowDisplayUUID =
+      DisplayIdentity.uuidString(of: screen)
   }
 
   @objc private func showAbout() {
@@ -302,96 +353,136 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
   // MARK: – Render + apply
 
-  /// Renders the wallpaper.html, snapshots it to PNG, and points
-  /// every connected display at the resulting file. Idempotent —
-  /// safe to call concurrently with a timer tick because both
-  /// paths share the same renderer's serial queue.
+  /// Per-screen render target. We snapshot identity + size at
+  /// the top of an update so the loop is unaffected by displays
+  /// being attached/detached mid-iteration — the next update
+  /// rebuilds the list.
+  private struct ScreenRenderTarget {
+    let displayID: CGDirectDisplayID
+    let displayUUID: String
+    let size: NSSize
+    let label: String  // localizedName for logs
+  }
+
+  /// Render the wallpaper once per connected (and enabled)
+  /// display, then hand each image to the overlay layer keyed
+  /// by `CGDirectDisplayID`. Renders are serialised because the
+  /// shared WKWebView can only do one snapshot at a time — the
+  /// per-screen loop chains via the previous render's
+  /// completion. Total wall-clock per update grows linearly with
+  /// the number of enabled displays, but each screen's overlay
+  /// flips to its new bitmap as soon as it lands so the user
+  /// sees progressive updates instead of one long stall.
   private func updateWallpaper() {
     Diagnostics.log("updateWallpaper() called")
-    let payload = config.buildWallpaperPayload()
-    // Tell the overlay layer the centerLon we're about to
-    // render at — markers project against this, so the
-    // overlay-drawn marker sits exactly over where the
-    // wallpaper would have drawn it.
-    overlayState.updateCenterLon(payload.centerLon)
+    // Apply the global config + the global centerLon up front
+    // so single-screen callers (and tests of the legacy path)
+    // still see something sensible. Per-display centerLons are
+    // recorded as each target's render lands below.
+    let globalPayload = config.buildWallpaperPayload()
+    overlayState.updateCenterLon(globalPayload.centerLon)
     overlayState.applyConfig(config.config)
     overlayState.homeCoordinate = resolveHomeCoordinate()
     overlayState.menuBarHeight = Double(
       WallpaperRenderer.maxMenuBarHeight())
-    Diagnostics.log(String(format:
-      "overlay: centerLon=%.4f, mode=%@, screens=%d, menubar=%.0f",
-      payload.centerLon,
-      String(describing: config.config.centerMode),
-      NSScreen.screens.count,
-      overlayState.menuBarHeight))
+
+    // Build the per-screen render plan. Skip displays the user
+    // has disabled in Settings; their overlay window stays
+    // empty (black background) and no CLGeocoder / WKWebView
+    // cost is paid for them.
+    let disabled = Set(config.config.disabledDisplays)
+    var targets: [ScreenRenderTarget] = []
     for screen in NSScreen.screens {
-      Diagnostics.log(String(format:
-        "  screen size=%.0fx%.0f aspect=%@",
-        screen.frame.width, screen.frame.height,
-        String(describing: config.config.aspectFit)))
+      guard
+        let id = DisplayIdentity.id(of: screen),
+        let uuid = DisplayIdentity.uuidString(forID: id)
+      else { continue }
+      if disabled.contains(uuid) {
+        Diagnostics.log(String(format:
+          "  screen '%@' (uuid=%@) disabled — skipping",
+          screen.localizedName, uuid))
+        continue
+      }
+      targets.append(ScreenRenderTarget(
+        displayID: id,
+        displayUUID: uuid,
+        size: screen.frame.size,
+        label: screen.localizedName))
     }
-    let _imgSize = overlayState.wallpaperImage?.size
-      ?? NSScreen.main?.frame.size ?? .zero
+
+    // Garbage-collect images for displays that are no longer in
+    // the render plan (unplugged, or freshly disabled). Keeps
+    // overlayState.wallpaperImages from leaking across config
+    // changes.
+    let activeIDs = Set(targets.map(\.displayID))
+    for staleID in overlayState.wallpaperImages.keys
+                    where !activeIDs.contains(staleID) {
+      overlayState.wallpaperImages.removeValue(forKey: staleID)
+    }
+
     Diagnostics.log(String(format:
-      "  wallpaperImage size=%.0fx%.0f (used for projection)",
-      _imgSize.width, _imgSize.height))
-    for (i, m) in config.config.markers.enumerated() {
-      let mainSize = NSScreen.main?.frame.size ?? .zero
-      let ctx = Projection.ScreenContext(
-        screen: mainSize,
-        imageSize: _imgSize,
-        aspect: config.config.aspectFit,
-        menuBarHeight: overlayState.menuBarHeight,
-        bandVisible: config.config.showTimezoneBand)
-      let vb = Projection.viewBoxPoint(
-        lat: m.latitude, lon: m.longitude,
-        centerLon: payload.centerLon)
-      let pt = Projection.screenPoint(
-        viewBoxPoint: vb, in: ctx)
-      Diagnostics.log(String(format:
-        "  marker[%d] '%@' lat=%.2f lon=%.2f -> vb=(%.0f,%.0f) screen=%@",
-        i, m.label, m.latitude, m.longitude, vb.x, vb.y,
-        pt.map { String(format: "(%.0f,%.0f)", $0.x, $0.y) }
-          ?? "OFFSCREEN"))
-    }
+      "overlay: centerLon=%.4f, mode=%@, enabled-screens=%d, menubar=%.0f, perDisplay=%@",
+      globalPayload.centerLon,
+      String(describing: config.config.centerMode),
+      targets.count,
+      overlayState.menuBarHeight,
+      config.config.perDisplayEnabled ? "on" : "off"))
+
+    renderNextTarget(targets: targets, index: 0)
+  }
+
+  /// Recursive driver for the per-screen render loop. Pull the
+  /// next target, build its own per-display payload (so each
+  /// screen's `centerMode` / `aspectFit` / marker list takes
+  /// effect), hand it to the renderer with its screen size, and
+  /// on completion (success or failure) advance to the next
+  /// target. Stops cleanly when the list is exhausted.
+  private func renderNextTarget(
+    targets: [ScreenRenderTarget],
+    index: Int
+  ) {
+    guard index < targets.count else { return }
+    let target = targets[index]
+
+    // Build a payload for THIS display. When per-display mode
+    // is off, this folds in nothing and equals the global
+    // payload — same as the old code path.
+    let payload = config.buildWallpaperPayload(
+      forDisplay: target.displayUUID)
+    overlayState.centerLonsByDisplay[target.displayID] = payload.centerLon
+
+    Diagnostics.log(String(format:
+      "render [%d/%d] '%@' (%.0fx%.0f) centerLon=%.4f",
+      index + 1, targets.count, target.label,
+      target.size.width, target.size.height,
+      payload.centerLon))
+
+    // The resolved config drives the SVG's preserveAspectRatio
+    // injection inside the renderer, so we have to pass the
+    // per-display resolved cfg too — not the global one.
+    let resolvedCfg = config.config.resolved(forDisplay: target.displayUUID)
+
     renderer.render(
-      config: config.config,
+      forSize: target.size,
+      config: resolvedCfg,
       payload: (payload.config, payload.hass)
     ) { [weak self] result in
+      guard let self = self else { return }
       switch result {
       case .success(let output):
-        // Hand the bitmap to the overlay layer. The overlay
-        // window paints it as its background and the marker
-        // ZStack rides on top in the SAME view's coordinate
-        // space — no more disagreement between the OS's
-        // setDesktopImageURL crop/scale math and the
-        // overlay's projection math.
-        let label = output.fileURL?.lastPathComponent ?? "<in-memory>"
         Diagnostics.log(String(format:
-          "render succeeded — %@ — NSImage.size=%.0fx%.0f reps=%d",
-          label, output.image.size.width, output.image.size.height,
-          output.image.representations.count))
-        for rep in output.image.representations {
-          Diagnostics.log(String(format:
-            "  rep: pixelsWide=%d pixelsHigh=%d size=%.0fx%.0f",
-            rep.pixelsWide, rep.pixelsHigh,
-            rep.size.width, rep.size.height))
-        }
-        self?.overlayState.wallpaperImage = output.image
-        // setDesktopImageURL was the old delivery path. We
-        // keep `WallpaperApplier` compiled so flipping
-        // `WallpaperRenderer.writePNGToDisk` back on (plus
-        // re-enabling this call) restores the prior
-        // "macOS owns the wallpaper" mode. For now the
-        // overlay window IS the wallpaper.
-        if let url = output.fileURL {
-          let applyStart = Date()
-          self?.applier.applyToAllScreens(imageURL: url)
-          Diagnostics.log(String(format: "wallpaper applied (setDesktopImageURL took %.2f s)", Date().timeIntervalSince(applyStart)))
-        }
+          "  render done '%@' NSImage.size=%.0fx%.0f",
+          target.label,
+          output.image.size.width, output.image.size.height))
+        self.overlayState.wallpaperImages[target.displayID] = output.image
       case .failure(let error):
-        Diagnostics.log("render failed — \(error)")
+        Diagnostics.log(
+          "  render failed '\(target.label)' — \(error)")
       }
+      // Advance whether the previous render succeeded or
+      // failed — one bad display shouldn't block the others.
+      self.renderNextTarget(
+        targets: targets, index: index + 1)
     }
   }
 

@@ -132,6 +132,26 @@ struct WallpaperConfig: Codable, Equatable {
   /// having to revisit Settings.
   var launchAtStartup: Bool = true
 
+  /// Display UUIDs the user has explicitly disabled the
+  /// wallpaper on. Empty by default = render every connected
+  /// display. UUID rather than CGDirectDisplayID because the
+  /// numeric ID can shuffle when monitors are replugged; the
+  /// UUID is stable per-display across reboots.
+  var disabledDisplays: [String] = []
+
+  /// Master switch for the per-display override system. When
+  /// off (default), every display renders the same global
+  /// config. When on, `perDisplaySettings[uuid]` (if present)
+  /// overrides individual fields for that display — see
+  /// `resolved(forDisplay:)`.
+  var perDisplayEnabled: Bool = false
+
+  /// Per-display setting overrides, keyed by display UUID
+  /// string. Missing keys = inherit the global config wholesale.
+  /// Present keys override only the fields the user explicitly
+  /// set on that display (every override field is `Optional`).
+  var perDisplaySettings: [String: PerDisplaySettings] = [:]
+
   /// Reset everything to the documented defaults. Used by the
   /// "Reset to defaults" button in Settings.
   static let defaults = WallpaperConfig()
@@ -146,7 +166,8 @@ struct WallpaperConfig: Codable, Equatable {
     case showHomeName, showHomeTime, showHomeDate, homeLabel
     case homeDayColor, homeNightColor
     case markerDefaultColor, markerDayColor, markerNightColor
-    case updateInterval, paused, launchAtStartup
+    case updateInterval, paused, launchAtStartup, disabledDisplays
+    case perDisplayEnabled, perDisplaySettings
   }
 
   init() {}
@@ -187,6 +208,47 @@ struct WallpaperConfig: Codable, Equatable {
     self.updateInterval = try c.decodeIfPresent(Int.self, forKey: .updateInterval) ?? d.updateInterval
     self.paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? d.paused
     self.launchAtStartup = try c.decodeIfPresent(Bool.self, forKey: .launchAtStartup) ?? d.launchAtStartup
+    self.disabledDisplays = try c.decodeIfPresent([String].self, forKey: .disabledDisplays) ?? d.disabledDisplays
+    self.perDisplayEnabled = try c.decodeIfPresent(Bool.self, forKey: .perDisplayEnabled) ?? d.perDisplayEnabled
+    self.perDisplaySettings = try c.decodeIfPresent([String: PerDisplaySettings].self, forKey: .perDisplaySettings) ?? d.perDisplaySettings
+  }
+
+  /// Build the effective config for a particular display by
+  /// folding `perDisplaySettings[uuid]` overrides on top of `self`.
+  /// When per-display mode is off, or the display has no entry,
+  /// returns `self` unchanged. Pass nil for the global view (Settings
+  /// UI's "Global" tab uses this to show what unmodified displays will see).
+  ///
+  /// Each Optional override field that's non-nil replaces its
+  /// counterpart on the resolved config; nil falls through. `markers`
+  /// is the exception — when a per-display entry exists, its markers
+  /// list REPLACES the global one entirely (since the user asked for
+  /// "separate marker list for each display", not a filter).
+  func resolved(forDisplay uuid: String?) -> WallpaperConfig {
+    guard
+      perDisplayEnabled,
+      let uuid = uuid,
+      let pd = perDisplaySettings[uuid]
+    else { return self }
+
+    var out = self
+    if let v = pd.centerMode { out.centerMode = v }
+    if let v = pd.manualLatitude { out.manualLatitude = v }
+    if let v = pd.manualLongitude { out.manualLongitude = v }
+    if let v = pd.aspectFit { out.aspectFit = v }
+    if let v = pd.showTimezoneBand { out.showTimezoneBand = v }
+    if let v = pd.showTimezoneBoundaries { out.showTimezoneBoundaries = v }
+    if let v = pd.clockPosition { out.clockPosition = v }
+    if let v = pd.clockSource { out.clockSource = v }
+    if let v = pd.manualTimezone { out.manualTimezone = v }
+    if let v = pd.showUTC { out.showUTC = v }
+    if let v = pd.showHomeMarker { out.showHomeMarker = v }
+    if let v = pd.homeLabel { out.homeLabel = v }
+    // Markers always replaced when a per-display entry exists,
+    // even when its list is empty — empty means "no markers on
+    // this screen", which is a valid choice.
+    out.markers = pd.markers
+    return out
   }
 }
 

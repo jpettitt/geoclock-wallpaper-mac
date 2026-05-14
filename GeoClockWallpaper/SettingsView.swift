@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// SwiftUI Settings pane. TabView at the top splits the surface
@@ -20,6 +21,10 @@ struct SettingsView: View {
         .tabItem { Label("Clock", systemImage: "clock") }
       MarkersSettingsTab()
         .tabItem { Label("Markers", systemImage: "mappin") }
+      DisplaysSettingsTab()
+        .tabItem { Label("Displays", systemImage: "display.2") }
+      ThisDisplaySettingsTab()
+        .tabItem { Label("This display", systemImage: "display") }
       ScheduleSettingsTab()
         .tabItem { Label("Schedule", systemImage: "timer") }
     }
@@ -48,18 +53,17 @@ private struct MapSettingsTab: View {
           }
         }
         if store.config.centerMode == .manual {
-          HStack {
-            TextField(
-              "Latitude",
-              value: $store.config.manualLatitude,
-              format: .number.precision(.fractionLength(0...4))
-            )
-            TextField(
-              "Longitude",
-              value: $store.config.manualLongitude,
-              format: .number.precision(.fractionLength(0...4))
-            )
-          }
+          // Only longitude matters for centering — the map is
+          // equirectangular and the latitude doesn't change
+          // which slice of the world is on-screen. Skipping
+          // the lat input also keeps the card from synthesizing
+          // a "home" entity, which would otherwise drop an
+          // unhideable home-marker at the centering point.
+          TextField(
+            "Center longitude",
+            value: $store.config.manualLongitude,
+            format: .number.precision(.fractionLength(0...4))
+          )
         }
         if store.config.centerMode == .myLocation {
           Text(location.statusDescription())
@@ -194,10 +198,14 @@ private struct MarkersSettingsTab: View {
             .foregroundStyle(.secondary)
         }
         ForEach($store.config.markers) { $marker in
+          let markerID = marker.id
           MarkerRow(
             marker: $marker,
             defaultDayHex: store.config.markerDayColor,
-            defaultNightHex: store.config.markerNightColor)
+            defaultNightHex: store.config.markerNightColor,
+            onDelete: {
+              store.config.markers.removeAll { $0.id == markerID }
+            })
           Divider()
         }
         Button(action: addMarker) {
@@ -218,7 +226,7 @@ private struct MarkersSettingsTab: View {
 /// timezone in one round-trip; the resolved coords are shown
 /// read-only below. A small error glyph surfaces when the last
 /// lookup failed (no result / network down).
-private struct MarkerRow: View {
+struct MarkerRow: View {
   @Binding var marker: Marker
   /// Day-side fallback colour shown as the picker placeholder
   /// when the marker hasn't set its own day colour.
@@ -226,7 +234,13 @@ private struct MarkerRow: View {
   /// Night-side fallback colour. Mirrors `defaultDayHex` for the
   /// corresponding night picker.
   let defaultNightHex: String
-  @EnvironmentObject var store: ConfigStore
+  /// Callback invoked when the trash button is tapped. Callers
+  /// remove the marker from the source list they own (global
+  /// `config.markers` or a per-display `perDisplaySettings[uuid]
+  /// .markers`). Without this hook the trash button would
+  /// always hit the global list regardless of which panel
+  /// hosted the row.
+  let onDelete: () -> Void
 
   /// Transient per-row state. Tracks the place text the user is
   /// editing (separate from `marker.place` so we don't overwrite
@@ -346,7 +360,212 @@ private struct MarkerRow: View {
   }
 
   private func remove() {
-    store.config.markers.removeAll { $0.id == marker.id }
+    onDelete()
+  }
+}
+
+// MARK: – Displays tab
+
+/// Lists every connected `NSScreen` so the user can opt out of
+/// rendering the wallpaper on individual monitors. The toggle
+/// state is persisted as the display's UUID (stable across
+/// reboots / replug), not its runtime `CGDirectDisplayID`.
+///
+/// On a single-display setup the per-monitor toggle is hidden —
+/// disabling the only display would just produce a black
+/// wallpaper everywhere, which is what unchecking "Launch at
+/// startup" accomplishes more directly.
+private struct DisplaysSettingsTab: View {
+  @EnvironmentObject var store: ConfigStore
+  @State private var screens: [NSScreen] = NSScreen.screens
+
+  /// Refresh `screens` whenever the system tells us the display
+  /// layout changed — plug, unplug, resolution swap. Without
+  /// this the tab would show stale state if the user opens it,
+  /// plugs in a monitor, then expects to see the new row.
+  private let screenChangePublisher = NotificationCenter.default.publisher(
+    for: NSApplication.didChangeScreenParametersNotification)
+
+  var body: some View {
+    Form {
+      Section("Connected displays") {
+        if screens.isEmpty {
+          Text("No displays detected.")
+            .foregroundStyle(.secondary)
+        } else if screens.count == 1, let s = screens.first {
+          DisplayRow(screen: s, canToggle: false)
+          Text("Per-monitor toggles appear here once a second display is connected.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        } else {
+          ForEach(displayItems, id: \.id) { item in
+            DisplayRow(screen: item.screen, canToggle: true)
+          }
+        }
+      }
+
+      Section("Per-display settings") {
+        Toggle("Use per-display settings",
+               isOn: $store.config.perDisplayEnabled)
+        if store.config.perDisplayEnabled {
+          Text("Each enabled display gets a floating settings panel positioned in its top-right corner. Override the global Map / Clock / Home / Markers controls per screen, or leave fields blank to inherit.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Button("Show panels") {
+            NotificationCenter.default.post(
+              name: .showPerDisplayPanels, object: nil)
+          }
+        } else {
+          Text("All displays share the global settings above. Turn this on to give each monitor its own centering, aspect, clock placement, and marker list.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+
+      Section {
+        Text("Disabling a display stops GeoClockWallpaper from drawing on that monitor. Your system wallpaper for that screen stays visible underneath.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+    }
+    .formStyle(.grouped)
+    .onReceive(screenChangePublisher) { _ in
+      screens = NSScreen.screens
+    }
+  }
+
+  /// Build an Identifiable list off `screens` so ForEach has a
+  /// stable key even when NSScreen instances get re-issued.
+  private var displayItems: [DisplayItem] {
+    screens.compactMap { screen in
+      guard let id = DisplayIdentity.id(of: screen) else { return nil }
+      return DisplayItem(id: id, screen: screen)
+    }
+  }
+
+  private struct DisplayItem {
+    let id: CGDirectDisplayID
+    let screen: NSScreen
+  }
+}
+
+/// One row in the Displays tab. Shows the display's name +
+/// pt size and (when `canToggle` is true) a "Show wallpaper"
+/// switch that toggles membership in
+/// `config.disabledDisplays`.
+private struct DisplayRow: View {
+  let screen: NSScreen
+  let canToggle: Bool
+  @EnvironmentObject var store: ConfigStore
+
+  var body: some View {
+    HStack(alignment: .center, spacing: 12) {
+      VStack(alignment: .leading, spacing: 2) {
+        Text(screen.localizedName)
+          .font(.body)
+        Text(String(
+          format: "%.0f × %.0f pt  •  scale %.0fx",
+          screen.frame.width, screen.frame.height,
+          screen.backingScaleFactor))
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      Spacer()
+      if canToggle, let uuid = DisplayIdentity.uuidString(of: screen) {
+        Toggle("Show wallpaper", isOn: enabledBinding(for: uuid))
+          .labelsHidden()
+      }
+    }
+    .padding(.vertical, 2)
+  }
+
+  /// Inverts the disabled-set semantics for the UI: the toggle
+  /// reads "on = wallpaper enabled" while the persisted state
+  /// is "off = uuid in disabledDisplays".
+  private func enabledBinding(for uuid: String) -> Binding<Bool> {
+    Binding(
+      get: { !store.config.disabledDisplays.contains(uuid) },
+      set: { isEnabled in
+        if isEnabled {
+          store.config.disabledDisplays.removeAll { $0 == uuid }
+        } else if !store.config.disabledDisplays.contains(uuid) {
+          store.config.disabledDisplays.append(uuid)
+        }
+      }
+    )
+  }
+}
+
+// MARK: – This display tab
+
+/// Per-display override panel embedded directly in Settings —
+/// targets whichever screen the Settings window is currently
+/// on. The Displays tab's master toggle ("Use per-display
+/// settings") gates whether the controls are live; when off,
+/// this tab shows a hint and a quick-enable button.
+///
+/// While Settings is on a given screen, the floating panel
+/// for that same display is suppressed by
+/// `PerDisplayPanelManager` so the user never sees the same
+/// controls twice. Drag Settings to another monitor and the
+/// content here re-targets that monitor; the floating panel
+/// for the screen Settings just left reappears.
+private struct ThisDisplaySettingsTab: View {
+  @EnvironmentObject var store: ConfigStore
+  @EnvironmentObject var overlay: OverlayState
+
+  var body: some View {
+    Group {
+      if !store.config.perDisplayEnabled {
+        offState
+      } else if let uuid = overlay.settingsWindowDisplayUUID,
+                let name = displayName(forUUID: uuid) {
+        PerDisplayConfigView(displayUUID: uuid, displayName: name)
+      } else {
+        unknownState
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  /// Shown when the master "Use per-display settings" toggle
+  /// in the Displays tab is off.
+  private var offState: some View {
+    Form {
+      Section("Per-display settings are off") {
+        Text("Turn on per-display settings to give each connected monitor its own centering, aspect, clock placement, and marker list. The settings on the other tabs become the global defaults that every display inherits unless you override them here.")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+        Button("Enable per-display settings") {
+          store.config.perDisplayEnabled = true
+        }
+      }
+    }
+    .formStyle(.grouped)
+  }
+
+  /// Fallback when we can't figure out which display Settings
+  /// is on (very rare — usually only during the moment between
+  /// window-creation and AppKit posting `windowDidChangeScreen`).
+  private var unknownState: some View {
+    Form {
+      Section {
+        Text("Move the Settings window onto the display you want to configure. This tab targets whichever screen Settings is currently on.")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+      }
+    }
+    .formStyle(.grouped)
+  }
+
+  /// Resolve a display UUID back to a human name (the
+  /// `localizedName` of the matching `NSScreen`). Returns nil
+  /// when the display has been unplugged while Settings is
+  /// open — caller falls through to `unknownState`.
+  private func displayName(forUUID uuid: String) -> String? {
+    NSScreen.screens.first(where: {
+      DisplayIdentity.uuidString(of: $0) == uuid
+    })?.localizedName
   }
 }
 
@@ -419,7 +638,7 @@ private struct ScheduleSettingsTab: View {
 /// clear a color back to "inherit from default" the user can
 /// option-click — handled by an explicit reset gesture on the
 /// label if/when we surface one.
-private struct HexColorPicker: View {
+struct HexColorPicker: View {
   let title: String
   @Binding var hex: String
   var placeholder: String = "#808080"

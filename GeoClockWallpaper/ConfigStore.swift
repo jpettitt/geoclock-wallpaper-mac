@@ -81,10 +81,17 @@ final class ConfigStore: ObservableObject {
   }
 
   /// Reset to the documented defaults. Wired to a button in
-  /// Settings.
+  /// Settings. "Reset" means literally clear: not just the
+  /// typed config but also LocationService's cached
+  /// last-known fix, otherwise the home marker keeps drawing
+  /// at the previously-cached coordinate (especially obvious
+  /// after the user switches off `centerMode = .manual` —
+  /// the home dot keeps haunting the same spot). The next
+  /// real CoreLocation fix will refill the coordinate.
   func resetToDefaults() {
     config = .defaults
     paused = false
+    LocationService.shared.clearCachedFix()
   }
 
   // MARK: – Payload assembly
@@ -111,30 +118,55 @@ final class ConfigStore: ObservableObject {
   /// That lets the overlay layer use the exact same value when
   /// projecting markers — they sit on top of where the
   /// underlying PNG would have drawn them.
-  func buildWallpaperPayload() -> WallpaperPayload {
+  func buildWallpaperPayload(
+    forDisplay uuid: String? = nil
+  ) -> WallpaperPayload {
+    // Fold per-display overrides into the config we project. nil
+    // uuid (or per-display mode off) makes this the same as the
+    // global config — the existing single-screen path.
+    let cfg = config.resolved(forDisplay: uuid)
     var c: [String: Any] = [:]
 
     // Card-side visibility toggles. Clock-position-driven hiding
     // is layered on top via CSS injection in WallpaperRenderer —
     // we still set showUTC=false here when the user picked the
     // hidden position so the card doesn't bother computing it.
-    c["showTimezoneBand"] = config.showTimezoneBand
-    c["showTimezoneBoundaries"] = config.showTimezoneBoundaries
-    c["showHomeMarker"] = config.showHomeMarker
-    c["showHomeMarkerLabel"] = config.showHomeMarkerLabel
-    c["showUTC"] = config.clockPosition != .hidden && config.showUTC
-    c["markerColor"] = config.markerDefaultColor
+    c["showTimezoneBand"] = cfg.showTimezoneBand
+    c["showTimezoneBoundaries"] = cfg.showTimezoneBoundaries
+    c["showHomeMarker"] = cfg.showHomeMarker
+    c["showHomeMarkerLabel"] = cfg.showHomeMarkerLabel
+    c["showUTC"] = cfg.clockPosition != .hidden && cfg.showUTC
+    c["markerColor"] = cfg.markerDefaultColor
 
     // Centering. We pre-resolve every mode to a numeric
-    // (lat, lon) Swift-side and use the wallpaper page's
-    // centerLatitude/centerLongitude shortcut so both the card
-    // and the overlay see the same value. Sun mode uses the
-    // current subsolar point; everything else is config- or
-    // Location-derived.
-    let resolved = resolveCenterCoordinate()
-    c["center"] = "home"
-    c["centerLatitude"] = resolved.lat
-    c["centerLongitude"] = resolved.lon
+    // (lat, lon) Swift-side so the Swift overlay can project
+    // markers against the exact same longitude the rendered
+    // image is centered on. Two routes into the card:
+    //
+    //   - Manual mode: drive the card's `center: 'longitude'`
+    //     schema directly. We skip the `centerLatitude` /
+    //     `centerLongitude` wallpaper shortcut here on purpose
+    //     — that shortcut synthesizes a fake "home" entity at
+    //     (centerLatitude, centerLongitude), which made the
+    //     card draw a home-marker at the user's chosen
+    //     centering point (visible through `overlayHidingCSS`
+    //     gaps and impossible to hide). Manual mode is just
+    //     "show me the world centered on longitude X" — no
+    //     home implied.
+    //
+    //   - Every other mode: keep the existing `center: 'home'`
+    //     path with a synthesized home so the card's IANA tz
+    //     fallback for the clock still has somewhere sensible
+    //     to land.
+    let center = resolveCenterCoordinate(forDisplay: uuid)
+    if cfg.centerMode == .manual {
+      c["center"] = "longitude"
+      c["centerLongitude"] = center.lon
+    } else {
+      c["center"] = "home"
+      c["centerLatitude"] = center.lat
+      c["centerLongitude"] = center.lon
+    }
 
     // Clock source. matchCenter inherits centerMode's IANA tzid
     // (the card derives this from hass.config.time_zone, which
@@ -142,7 +174,7 @@ final class ConfigStore: ObservableObject {
     // v0 we only populate mainTimeZone in the manualTimezone
     // case; matchCenter + myLocation/timezoneGuess will gain
     // proper resolution once those services land.
-    switch config.clockSource {
+    switch cfg.clockSource {
     case .matchCenter:
       // Card default mainTimeSource is "home"; the wallpaper page
       // falls through to the visitor's device tz when no
@@ -153,8 +185,8 @@ final class ConfigStore: ObservableObject {
     case .device:
       c["mainTimeSource"] = "device"
     case .manualTimezone:
-      if !config.manualTimezone.isEmpty {
-        c["mainTimeZone"] = config.manualTimezone
+      if !cfg.manualTimezone.isEmpty {
+        c["mainTimeZone"] = cfg.manualTimezone
       }
     }
 
@@ -162,8 +194,8 @@ final class ConfigStore: ObservableObject {
     // page's inline-coord shortcut so they don't need an HA hass
     // stub. Empty list → omit the key entirely (card defaults
     // to no markers).
-    if !config.markers.isEmpty {
-      c["markers"] = config.markers.map { m -> [String: Any] in
+    if !cfg.markers.isEmpty {
+      c["markers"] = cfg.markers.map { m -> [String: Any] in
         var dict: [String: Any] = [
           "label": m.label,
           "latitude": m.latitude,
@@ -185,21 +217,31 @@ final class ConfigStore: ObservableObject {
     return WallpaperPayload(
       config: c,
       hass: [:],
-      centerLon: resolved.lon)
+      centerLon: center.lon)
   }
 
   /// Resolve `(centerLatitude, centerLongitude)` for the
-  /// current `centerMode`. Falls through gracefully when a
-  /// mode's preferred source is unavailable (CL not granted,
-  /// tzid not in the centroid table, etc.) to the next
-  /// option in the chain documented in TODO.md.
-  func resolveCenterCoordinate() -> (lat: Double, lon: Double) {
-    switch config.centerMode {
+  /// requested display's effective centerMode. With per-display
+  /// mode off (or no uuid), this is the global resolution.
+  /// Falls through gracefully when a mode's preferred source is
+  /// unavailable (CL not granted, tzid not in the centroid
+  /// table, etc.) to the next option in the chain documented in
+  /// TODO.md.
+  func resolveCenterCoordinate(
+    forDisplay uuid: String? = nil
+  ) -> (lat: Double, lon: Double) {
+    let cfg = config.resolved(forDisplay: uuid)
+    switch cfg.centerMode {
     case .sun:
       let sub = Sun.subsolarPoint(at: Date())
       return (sub.lat, sub.lon)
     case .manual:
-      return (config.manualLatitude, config.manualLongitude)
+      // Latitude is irrelevant for equirectangular centering —
+      // only longitude shifts which slice of the world is
+      // on-screen. We zero it out (rather than reading the
+      // ignored `cfg.manualLatitude`) to make the intent
+      // explicit at the call site.
+      return (0, cfg.manualLongitude)
     case .myLocation:
       if let c = LocationService.shared.coordinate {
         return (c.latitude, c.longitude)

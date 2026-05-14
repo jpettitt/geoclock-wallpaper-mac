@@ -23,6 +23,18 @@ enum OverlayWindowFactory {
       screen: screen
     )
 
+    // AppKit places borderless windows at the wrong global origin
+    // when the `contentRect` passed to init describes a non-
+    // primary screen — empirically the window ends up at (2x,2y)
+    // of the secondary's screen.frame.origin, parked far off
+    // screen. An explicit setFrame after init forces the correct
+    // global position. Without this, only the primary monitor's
+    // overlay shows on launch; the secondaries lurk off-screen
+    // until something fires `didChangeScreenParametersNotification`
+    // (e.g. opening Settings) and the rebuild path's own
+    // setFrame call corrects them.
+    window.setFrame(screen.frame, display: false)
+
     // Window level: above wallpaper, below user app windows
     // and Finder desktop icons. Bridge CGWindowLevel (Int32)
     // through NSWindow.Level's raw Int.

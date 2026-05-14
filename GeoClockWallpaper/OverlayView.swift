@@ -22,6 +22,29 @@ struct OverlayView: View {
   @ObservedObject var state: OverlayState
   let screen: NSScreen
 
+  /// Per-screen effective config. Folds any
+  /// `perDisplaySettings[uuid]` overrides on top of the global
+  /// `WallpaperConfig`. Read every field through this rather
+  /// than `state.X` so the per-display system actually changes
+  /// what this overlay renders. Recomputed on each body pass
+  /// (cheap struct copy with a dict lookup).
+  private var resolved: WallpaperConfig {
+    state.resolvedConfig(forScreen: screen)
+  }
+
+  /// CenterLon for this screen's wallpaper render. Each
+  /// display can have a different `centerMode` under
+  /// per-display mode, so we look up the per-display value
+  /// first and only fall back to the global one when this
+  /// screen hasn't been rendered yet.
+  private var centerLon: Double {
+    if let id = DisplayIdentity.id(of: screen),
+       let lon = state.centerLonsByDisplay[id] {
+      return lon
+    }
+    return state.currentCenterLon
+  }
+
   var body: some View {
     // Don't draw anything until a wallpaper render has committed
     // a centerLon — otherwise the overlay flashes markers at
@@ -55,17 +78,17 @@ struct OverlayView: View {
   private var debugGrid: some View {
     let ctx = Projection.ScreenContext(
       screen: screen.frame.size,
-      imageSize: state.wallpaperImage?.size ?? screen.frame.size,
-      aspect: state.aspectFit,
+      imageSize: self.wallpaperImage?.size ?? screen.frame.size,
+      aspect: resolved.aspectFit,
       menuBarHeight: state.menuBarHeight,
-      bandVisible: state.showTimezoneBand
+      bandVisible: resolved.showTimezoneBand
     )
     if let painted = Projection.paintedRect(in: ctx) {
       Canvas { context, _ in
         let mapW = Projection.mapW
         let mapH = Projection.mapH
-        let totalH = Projection.totalH(bandVisible: state.showTimezoneBand)
-        let yMin = Projection.yMin(bandVisible: state.showTimezoneBand)
+        let totalH = Projection.totalH(bandVisible: resolved.showTimezoneBand)
+        let yMin = Projection.yMin(bandVisible: resolved.showTimezoneBand)
         // SwiftUI Color has no .magenta — use RGB literal.
         let stroke = GraphicsContext.Shading.color(
           Color(red: 1, green: 0, blue: 1, opacity: 0.85))
@@ -80,7 +103,7 @@ struct OverlayView: View {
         }
         // Longitude lines.
         for lon in stride(from: -180.0, to: 180.0, by: 30.0) {
-          let leftEdgeLon = state.currentCenterLon - 180
+          let leftEdgeLon = centerLon - 180
           var lonE = (lon - leftEdgeLon)
             .truncatingRemainder(dividingBy: 360)
           if lonE < 0 { lonE += 360 }
@@ -116,9 +139,18 @@ struct OverlayView: View {
   /// stretch variants would need different modifiers — we
   /// leave that to a future revision once the single-mode
   /// case is verified.
+  /// The rendered bitmap for THIS screen specifically. Each
+  /// physical display has its own entry in
+  /// `state.wallpaperImages` so we don't crop a 21:9 ultrawide
+  /// render across a 16:9 secondary.
+  private var wallpaperImage: NSImage? {
+    guard let id = DisplayIdentity.id(of: screen) else { return nil }
+    return state.wallpaperImages[id]
+  }
+
   @ViewBuilder
   private var wallpaperBackground: some View {
-    if let image = state.wallpaperImage {
+    if let image = wallpaperImage {
       Image(nsImage: image)
         .resizable()
         .interpolation(.high)
@@ -134,18 +166,27 @@ struct OverlayView: View {
 
   @ViewBuilder
   private var homeMarker: some View {
-    if state.showHomeMarker,
-       let home = state.homeCoordinate,
-       let pt = projection(lat: home.latitude, lon: home.longitude) {
-      MarkerDot(
-        color: homeColor(at: home),
-        haloOpacity: 0.35,
-        label: state.showHomeName ? homeLabel : nil,
-        // `homeTime` already returns nil when both showHomeTime
-        // and showHomeDate are off, so no extra gate here.
-        time: homeTime,
-        screenPoint: pt
-      )
+    // The "Show home marker" toggle is the user's explicit
+    // choice and we honour it regardless of centerMode — the
+    // home dot pins where the user actually IS (CoreLocation),
+    // not where the map happens to be centered. Manual mode
+    // centers on a different longitude, but the user can still
+    // want to see their real location marked.
+    //
+    // Drawn at every wrap-tile position the location maps to
+    // (typically 1; up to 3 in a letterbox bar layout where the
+    // map repeats into the side bars).
+    if resolved.showHomeMarker, let home = state.homeCoordinate {
+      let pts = projectionPoints(lat: home.latitude, lon: home.longitude)
+      ForEach(Array(pts.enumerated()), id: \.offset) { _, pt in
+        MarkerDot(
+          color: homeColor(at: home),
+          haloOpacity: 0.35,
+          label: state.showHomeName ? homeLabel : nil,
+          time: homeTime,
+          screenPoint: pt
+        )
+      }
     }
   }
 
@@ -160,7 +201,7 @@ struct OverlayView: View {
   }
 
   private var homeLabel: String {
-    state.homeLabel.isEmpty ? "Home" : state.homeLabel
+    resolved.homeLabel.isEmpty ? "Home" : resolved.homeLabel
   }
   private var homeTime: String? {
     formatMarkerTime(
@@ -173,15 +214,25 @@ struct OverlayView: View {
   // MARK: – User markers
 
   private var userMarkers: some View {
-    ForEach(state.markers) { m in
-      if let pt = projection(lat: m.latitude, lon: m.longitude) {
+    // Skip markers that haven't had a real location set yet —
+    // fresh rows default to lat=0/lon=0 (Gulf of Guinea, an
+    // open-ocean spot the user almost certainly didn't intend)
+    // and would otherwise render a stray dot the instant the
+    // user clicks "Add marker" but before they type a place.
+    //
+    // Each marker is drawn once per visible wrap-tile copy so
+    // a marker whose longitude appears twice on screen
+    // (letterbox bars showing the wrapped day image) also
+    // appears twice.
+    ForEach(resolved.markers.filter {
+      $0.latitude != 0 || $0.longitude != 0
+    }) { m in
+      let pts = projectionPoints(lat: m.latitude, lon: m.longitude)
+      ForEach(Array(pts.enumerated()), id: \.offset) { _, pt in
         MarkerDot(
           color: markerColor(for: m),
           haloOpacity: 0.30,
           label: m.showLabel ? markerLabel(for: m) : nil,
-          // markerTime returns nil when both showTime and
-          // showDate are off, so the dot collapses to label-only
-          // (or just the dot) without a stray empty row.
           time: markerTime(for: m),
           screenPoint: pt
         )
@@ -234,8 +285,8 @@ struct OverlayView: View {
 
   @ViewBuilder
   private var clockReadout: some View {
-    if state.clockPosition != .hidden {
-      ClockBlock(state: state)
+    if resolved.clockPosition != .hidden {
+      ClockBlock(state: state, resolved: resolved)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .position(clockAnchor)
@@ -275,7 +326,7 @@ struct OverlayView: View {
     let leftX = dockLeft + sideOffset
     let rightX = frame.width - dockRight - sideOffset
 
-    switch state.clockPosition {
+    switch resolved.clockPosition {
     case .hidden:      return .zero  // unused
     case .topLeft:     return CGPoint(x: leftX, y: topY)
     case .topRight:    return CGPoint(x: rightX, y: topY)
@@ -289,14 +340,35 @@ struct OverlayView: View {
   private func projection(lat: Double, lon: Double) -> CGPoint? {
     let ctx = Projection.ScreenContext(
       screen: screen.frame.size,
-      imageSize: state.wallpaperImage?.size ?? screen.frame.size,
-      aspect: state.aspectFit,
+      imageSize: self.wallpaperImage?.size ?? screen.frame.size,
+      aspect: resolved.aspectFit,
       menuBarHeight: state.menuBarHeight,
-      bandVisible: state.showTimezoneBand
+      bandVisible: resolved.showTimezoneBand
     )
     return Projection.screenPoint(
       lat: lat, lon: lon,
-      centerLon: state.currentCenterLon,
+      centerLon: centerLon,
+      in: ctx
+    )
+  }
+
+  /// Every on-screen position for a single (lat, lon), including
+  /// wrap-tile copies that fall inside letterbox side-bars. The
+  /// wallpaper image tiles the map at offsetPx and offsetPx-MAP_W,
+  /// so a marker whose longitude is rendered twice on screen
+  /// should be drawn twice too. Returns 1 point in the typical
+  /// "single visible wrap" case (cropOverflow, or aspect matched).
+  private func projectionPoints(lat: Double, lon: Double) -> [CGPoint] {
+    let ctx = Projection.ScreenContext(
+      screen: screen.frame.size,
+      imageSize: self.wallpaperImage?.size ?? screen.frame.size,
+      aspect: resolved.aspectFit,
+      menuBarHeight: state.menuBarHeight,
+      bandVisible: resolved.showTimezoneBand
+    )
+    return Projection.screenPoints(
+      lat: lat, lon: lon,
+      centerLon: centerLon,
       in: ctx
     )
   }
@@ -439,6 +511,12 @@ private struct MarkerLabelHeightKey: PreferenceKey {
 /// optional UTC line below.
 private struct ClockBlock: View {
   @ObservedObject var state: OverlayState
+  /// Per-screen effective config — passed in so the parent
+  /// (`OverlayView`) decides which screen's overrides this
+  /// clock block reads from. Without this, switching to a
+  /// per-display clock position / source on a non-primary
+  /// monitor wouldn't affect this block.
+  let resolved: WallpaperConfig
 
   var body: some View {
     VStack(alignment: alignment, spacing: 2) {
@@ -446,7 +524,7 @@ private struct ClockBlock: View {
         .font(.system(size: 30, weight: .semibold, design: .default))
         .foregroundStyle(.white)
         .monospacedDigit()
-      if state.showUTC {
+      if resolved.showUTC {
         Text(formattedUTC)
           .font(.system(size: 14, weight: .medium, design: .monospaced))
           .foregroundStyle(.yellow.opacity(0.85))
@@ -457,7 +535,7 @@ private struct ClockBlock: View {
   }
 
   private var alignment: HorizontalAlignment {
-    switch state.clockPosition {
+    switch resolved.clockPosition {
     case .topRight, .bottomRight: return .trailing
     default: return .leading
     }
@@ -483,13 +561,13 @@ private struct ClockBlock: View {
   }
 
   private func resolveClockTimezone() -> TimeZone {
-    switch state.clockSource {
+    switch resolved.clockSource {
     case .matchCenter:
       return TimeZone.current   // TODO: resolve from centerLon
     case .device:
       return TimeZone.current
     case .manualTimezone:
-      return TimeZone(identifier: state.manualTimezone) ?? .current
+      return TimeZone(identifier: resolved.manualTimezone) ?? .current
     }
   }
 }

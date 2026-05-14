@@ -207,4 +207,28 @@ enum Projection {
     let vb = viewBoxPoint(lat: lat, lon: lon, centerLon: centerLon)
     return screenPoint(viewBoxPoint: vb, in: ctx)
   }
+
+  /// Every on-screen position a single (lat, lon) maps to,
+  /// including the wrap-tile shifts at lonE ±360° in viewBox
+  /// pixel space. The day/night image pair tiles into the
+  /// letterbox side-bars in modes where the screen is wider
+  /// than the viewBox aspect, so a single physical location
+  /// can be visible at two (or three) screen positions at once.
+  /// Returns those positions in left-to-right order; offscreen
+  /// projections are dropped by `screenPoint`'s clip check.
+  static func screenPoints(
+    lat: Double, lon: Double,
+    centerLon: Double,
+    in ctx: ScreenContext
+  ) -> [CGPoint] {
+    let base = viewBoxPoint(lat: lat, lon: lon, centerLon: centerLon)
+    var out: [CGPoint] = []
+    for shift: Double in [-mapW, 0, mapW] {
+      let vb = (x: base.x + shift, y: base.y)
+      if let pt = screenPoint(viewBoxPoint: vb, in: ctx) {
+        out.append(pt)
+      }
+    }
+    return out
+  }
 }

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// Manages the desktop-level transparent windows that draw the
@@ -10,6 +11,11 @@ import SwiftUI
 /// resolution change, etc.). All windows share a single
 /// `OverlayState` so config changes redraw everywhere
 /// simultaneously.
+///
+/// Displays the user has opted out of in Settings
+/// (`state.disabledDisplays`, keyed by display UUID) get no
+/// window at all — the system wallpaper underneath stays
+/// untouched on those monitors.
 final class OverlayLayer {
 
   let state: OverlayState
@@ -20,6 +26,7 @@ final class OverlayLayer {
   /// the same physical/virtual display.
   private var windowsByDisplay: [CGDirectDisplayID: NSWindow] = [:]
   private var screenObserver: NSObjectProtocol?
+  private var disabledObserver: AnyCancellable?
 
   init(state: OverlayState) {
     self.state = state
@@ -31,6 +38,17 @@ final class OverlayLayer {
     ) { [weak self] _ in
       self?.rebuildWindows()
     }
+    // Rebuild when the user flips a per-display toggle in
+    // Settings — the disabled set is observed off the same
+    // OverlayState that drives the views. `receive(on:)`
+    // defers to the next runloop turn so the @Published's
+    // willSet-time emission lets the property finish writing
+    // before rebuildWindows reads `state.disabledDisplays`.
+    disabledObserver = state.$disabledDisplays
+      .removeDuplicates()
+      .dropFirst()
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self] _ in self?.rebuildWindows() }
   }
 
   deinit {
@@ -40,26 +58,32 @@ final class OverlayLayer {
     for w in windowsByDisplay.values { w.orderOut(nil) }
   }
 
-  /// (Re)create windows so there's exactly one per current
-  /// `NSScreen`. Existing windows for still-attached displays
-  /// stay (their frame is re-set in case the resolution
-  /// changed); orphaned windows for removed displays are torn
-  /// down.
+  /// (Re)create windows so there's exactly one per currently
+  /// **enabled** `NSScreen`. Existing windows for still-attached
+  /// enabled displays stay (their frame is re-set in case the
+  /// resolution changed); windows for removed OR newly-disabled
+  /// displays are torn down.
   private func rebuildWindows() {
-    let currentIDs: [CGDirectDisplayID] =
-      NSScreen.screens.compactMap(Self.displayID(of:))
+    let enabledScreens = NSScreen.screens.filter { screen in
+      guard let uuid = DisplayIdentity.uuidString(of: screen)
+      else { return true }  // unknown identity → render anyway
+      return !state.disabledDisplays.contains(uuid)
+    }
+    let enabledIDs: [CGDirectDisplayID] =
+      enabledScreens.compactMap(Self.displayID(of:))
 
-    // Drop windows for displays that no longer exist.
-    for (id, win) in windowsByDisplay where !currentIDs.contains(id) {
+    // Drop windows for displays that no longer exist OR that
+    // the user has just disabled.
+    for (id, win) in windowsByDisplay where !enabledIDs.contains(id) {
       win.orderOut(nil)
       windowsByDisplay.removeValue(forKey: id)
     }
 
-    // Add or refresh windows for current screens. For a
+    // Add or refresh windows for current enabled screens. For a
     // refresh we rebuild the SwiftUI hosting view because the
     // OverlayView captures the screen size — a resolution
     // change needs a fresh view, not just a new frame.
-    for screen in NSScreen.screens {
+    for screen in enabledScreens {
       guard let id = Self.displayID(of: screen) else { continue }
       let win: NSWindow
       if let existing = windowsByDisplay[id] {
