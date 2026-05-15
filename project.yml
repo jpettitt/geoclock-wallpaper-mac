@@ -85,12 +85,38 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
         GENERATE_INFOPLIST_FILE: NO  # we supply our own
 
+  # XCTest target for the pure-logic parts of the app —
+  # projection math, sun astronomical formulas, the
+  # WallpaperConfig Codable migrations and per-display
+  # `resolved(forDisplay:)` override folding. We don't (yet)
+  # test the AppKit/Combine/WKWebView surfaces; those need
+  # ui-test infrastructure that's a bigger lift.
+  GeoClockWallpaperTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: GeoClockWallpaperTests
+    dependencies:
+      - target: GeoClockWallpaper
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: world.geoclock.wallpaper.tests
+        PRODUCT_NAME: GeoClockWallpaperTests
+        BUNDLE_LOADER: $(TEST_HOST)
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/GeoClockWallpaper.app/Contents/MacOS/GeoClockWallpaper
+        GENERATE_INFOPLIST_FILE: YES
+
 schemes:
   GeoClockWallpaper:
     build:
       targets:
         GeoClockWallpaper: all
+        GeoClockWallpaperTests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - GeoClockWallpaperTests
     archive:
       config: Release
