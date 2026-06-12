@@ -82,7 +82,7 @@ enum TimezoneCentroid {
     "Europe/Bucharest":    (44.43,  26.10),
     "Europe/Kyiv":         (50.45,  30.52),
     "Europe/Moscow":       (55.75,  37.62),
-    "Europe/Madrid/Canary":(28.13, -15.43),
+    "Atlantic/Canary":     (28.13, -15.43),
     "Atlantic/Azores":     (37.74, -25.67),
 
     // Africa

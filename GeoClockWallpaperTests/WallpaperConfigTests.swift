@@ -140,10 +140,9 @@ final class WallpaperConfigTests: XCTestCase {
   }
 
   func testResolved_markersReplaceGlobalEntirely() {
-    // The per-display markers list is non-optional and OWNS
-    // that display's markers when an entry exists. We
-    // intentionally don't merge — each display can have a
-    // completely different list.
+    // A non-nil per-display markers list OWNS that display's
+    // markers. We intentionally don't merge — each display can
+    // have a completely different list.
     var cfg = WallpaperConfig.defaults
     cfg.markers = [Marker(label: "Global", latitude: 0, longitude: 0)]
     cfg.perDisplayEnabled = true
@@ -155,29 +154,77 @@ final class WallpaperConfigTests: XCTestCase {
     XCTAssertEqual(r.markers.map(\.label), ["PerDisplay"])
   }
 
-  func testResolved_emptyMarkersListMeansNoMarkers() {
-    // An entry with an empty markers list is a VALID user
-    // choice — "this display shows no markers" — not a
-    // missing override. Verify we don't quietly fall back to
-    // the global list.
+  func testResolved_explicitEmptyMarkersListMeansNoMarkers() {
+    // An EXPLICIT empty markers list is a valid user choice —
+    // "this display shows no markers". Verify we don't quietly
+    // fall back to the global list.
     var cfg = WallpaperConfig.defaults
     cfg.markers = [Marker(label: "Global", latitude: 0, longitude: 0)]
     cfg.perDisplayEnabled = true
-    cfg.perDisplaySettings["uuid-1"] = PerDisplaySettings()  // empty markers
+    var pd = PerDisplaySettings()
+    pd.markers = []  // explicit: none
+    cfg.perDisplaySettings["uuid-1"] = pd
 
     let r = cfg.resolved(forDisplay: "uuid-1")
     XCTAssertEqual(r.markers.count, 0,
-                   "empty per-display markers must NOT inherit global list")
+                   "explicit empty per-display markers must NOT inherit global list")
+  }
+
+  func testResolved_unrelatedOverrideDoesNotWipeMarkers() {
+    // REGRESSION: when markers was a non-optional `[Marker] = []`,
+    // materializing a settings entry for ANY override (clock
+    // position, aspect fit, even reverting a picker to Inherit)
+    // silently replaced the display's markers with the empty
+    // default — every dot vanished from that screen. With markers
+    // Optional, an entry that only overrides aspectFit must leave
+    // the global markers visible.
+    var cfg = WallpaperConfig.defaults
+    cfg.markers = [Marker(label: "Global", latitude: 1, longitude: 2)]
+    cfg.perDisplayEnabled = true
+    var pd = PerDisplaySettings()
+    pd.aspectFit = .letterbox  // unrelated override, markers untouched
+    cfg.perDisplaySettings["uuid-1"] = pd
+
+    let r = cfg.resolved(forDisplay: "uuid-1")
+    XCTAssertEqual(r.markers.map(\.label), ["Global"],
+                   "an unrelated per-display override must not wipe inherited markers")
+    XCTAssertEqual(r.aspectFit, .letterbox)
+  }
+
+  func testPerDisplaySettings_decodeHealsBuggyEmptyMarkers() throws {
+    // Configs saved by the pre-Optional builds carry
+    // `"markers":[]` on entries that were materialized by the
+    // wipe bug. Decoding those must restore inherit (nil) — but
+    // an entry carrying the explicit-empty flag stays empty.
+    let buggy = #"{"aspectFit":"letterbox","markers":[]}"#.data(using: .utf8)!
+    let healed = try decoder.decode(PerDisplaySettings.self, from: buggy)
+    XCTAssertNil(healed.markers,
+                 "legacy empty markers array should heal to inherit")
+
+    let deliberate = #"{"markers":[],"markersExplicitlyEmpty":true}"#.data(using: .utf8)!
+    let kept = try decoder.decode(PerDisplaySettings.self, from: deliberate)
+    XCTAssertEqual(kept.markers?.count, 0,
+                   "explicitly-empty markers must survive decode")
+  }
+
+  func testPerDisplaySettings_explicitEmptyMarkersRoundtrip() throws {
+    // encode → decode must preserve the deliberate-none choice.
+    var pd = PerDisplaySettings()
+    pd.markers = []
+    let data = try encoder.encode(pd)
+    let back = try decoder.decode(PerDisplaySettings.self, from: data)
+    XCTAssertEqual(back.markers?.count, 0)
   }
 
   // MARK: – PerDisplaySettings Codable
 
-  func testPerDisplaySettings_decodeMissingMarkersDefaultsToEmpty() throws {
+  func testPerDisplaySettings_decodeMissingMarkersMeansInherit() throws {
     let json = "{}".data(using: .utf8)!
     let pd = try decoder.decode(PerDisplaySettings.self, from: json)
-    XCTAssertEqual(pd.markers.count, 0)
+    XCTAssertNil(pd.markers, "absent markers key = inherit global")
     XCTAssertNil(pd.aspectFit)
     XCTAssertNil(pd.centerMode)
+    XCTAssertTrue(pd.isEmpty)
   }
 
   func testPerDisplaySettings_roundtripPreservesOverrides() throws {
@@ -194,6 +241,6 @@ final class WallpaperConfigTests: XCTestCase {
     XCTAssertEqual(back.aspectFit, .letterbox)
     XCTAssertEqual(back.showHomeMarker, false)
     XCTAssertEqual(back.homeLabel, "Office")
-    XCTAssertEqual(back.markers.map(\.label), ["A", "B"])
+    XCTAssertEqual(back.markers?.map(\.label), ["A", "B"])
   }
 }

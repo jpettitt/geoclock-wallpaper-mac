@@ -51,10 +51,14 @@ final class PerDisplayPanelManager: NSObject {
   /// would recurse forever before the first panel is fully
   /// configured.
   private var isRefreshing = false
-  /// Set during `closeAll()` so the NSWindowDelegate hook
-  /// doesn't recursively cascade-close (we're already closing
-  /// everything; the per-panel `windowWillClose` would otherwise
-  /// fire `closeAll` again for each panel in the loop).
+  /// A refresh request arrived while one was already running —
+  /// re-run once the current pass completes (see refresh()).
+  private var needsRefresh = false
+  /// Set during ANY programmatic panel close — `closeAll()` and
+  /// the stale-panel sweep in `refresh()` — so the
+  /// NSWindowDelegate hook can distinguish those from a
+  /// user-initiated X-click. Only user closes run the
+  /// close-everything cascade.
   private var isClosingAll = false
 
   init(store: ConfigStore, overlayState: OverlayState) {
@@ -140,11 +144,24 @@ final class PerDisplayPanelManager: NSObject {
 
   private func refresh(force: Bool = false) {
     if isRefreshing {
-      Diagnostics.log("perDisplayPanels: refresh re-entered, ignoring")
+      // Don't drop the request: the state change that triggered it
+      // still needs evaluating once the current pass finishes —
+      // otherwise panel state could stay stale until the next
+      // unrelated event. Defer below re-runs once.
+      needsRefresh = true
+      Diagnostics.log("perDisplayPanels: refresh re-entered, queued")
       return
     }
     isRefreshing = true
-    defer { isRefreshing = false }
+    defer {
+      isRefreshing = false
+      if needsRefresh {
+        needsRefresh = false
+        // Next runloop turn, not synchronously — we're inside the
+        // defer of the pass that just finished.
+        DispatchQueue.main.async { [weak self] in self?.refresh() }
+      }
+    }
     let cfg = store.config
     let settingsOpen = overlayState.settingsWindowDisplayUUID != nil
     Diagnostics.log(
@@ -174,11 +191,24 @@ final class PerDisplayPanelManager: NSObject {
     }
     let activeIDs = Set(activeScreens.compactMap(DisplayIdentity.id))
 
-    // Drop panels for displays that went away (unplugged or
-    // newly disabled).
-    for (id, panel) in panelsByDisplay where !activeIDs.contains(id) {
-      panel.close()
-      panelsByDisplay.removeValue(forKey: id)
+    // Drop panels for displays that went away (unplugged, newly
+    // disabled, or newly occupied by the Settings window). These
+    // are PROGRAMMATIC closes: without the isClosingAll guard the
+    // NSWindowDelegate's windowWillClose would treat each one as
+    // a user-initiated X-click and run the full cascade — closing
+    // every other panel AND the Settings window. That made
+    // dragging Settings to another monitor (whose panel then
+    // became stale) dismiss the entire config surface.
+    let staleIDs = panelsByDisplay.keys.filter { !activeIDs.contains($0) }
+    if !staleIDs.isEmpty {
+      isClosingAll = true
+      for id in staleIDs {
+        if let panel = panelsByDisplay[id] {
+          panel.close()
+          panelsByDisplay.removeValue(forKey: id)
+        }
+      }
+      isClosingAll = false
     }
 
     Diagnostics.log(String(format:

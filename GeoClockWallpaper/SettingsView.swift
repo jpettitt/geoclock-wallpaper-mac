@@ -339,8 +339,15 @@ struct MarkerRow: View {
     guard !query.isEmpty else { return }
     lookupInFlight = true
     lookupFailed = false
+    // The geocode completes seconds later (serialized behind other
+    // CLGeocoder lookups). Capture the marker's identity so a stale
+    // completion can't write through a ForEach binding that has
+    // since been re-pointed at a DIFFERENT marker (rows shift when
+    // one is deleted while a lookup is in flight).
+    let targetID = marker.id
     TimezoneResolver.shared.forward(place: query) { result in
       lookupInFlight = false
+      guard marker.id == targetID else { return }
       guard let result = result else {
         lookupFailed = true
         return
@@ -574,8 +581,10 @@ private struct ThisDisplaySettingsTab: View {
 private struct ScheduleSettingsTab: View {
   @EnvironmentObject var store: ConfigStore
 
-  // Local mirror so the slider's continuous drag doesn't fire a
-  // ConfigStore.persist() on every frame; we sync on release.
+  // Local mirror for the slider. onChange still fires per detent
+  // (the config mutation is what triggers downstream Combine
+  // pipelines), but ConfigStore.persist() itself is debounced so
+  // a drag costs one disk write, not one per tick.
   @State private var intervalSeconds: Double = 300
 
   var body: some View {

@@ -72,10 +72,34 @@ fi
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
+# --- Tests ----------------------------------------------------
+
+# Refuse to ship a build whose unit tests fail. Tests run in
+# Debug (fast, no signing requirements) before we pay for the
+# Release archive.
+echo "==> Running unit tests"
+TEST_LOG="$BUILD_DIR/xcodebuild-test.log"
+if ! xcodebuild \
+  -project "$PROJECT" \
+  -scheme "$SCHEME" \
+  -configuration Debug \
+  test > "$TEST_LOG" 2>&1; then
+  echo "ERROR: tests failed — see $TEST_LOG" >&2
+  tail -30 "$TEST_LOG" >&2
+  exit 1
+fi
+grep -E "Executed .* tests" "$TEST_LOG" | tail -1
+
 # --- Archive --------------------------------------------------
 
 echo "==> Archiving (Release, signed with $SIGNING_IDENTITY)"
 
+# Full output goes to a log file; we surface the summary lines.
+# Checking PIPESTATUS (not just the grep's exit code) means a
+# failed build fails the script with its log available, instead
+# of being masked by `grep || true` and only caught later by the
+# missing-archive check with no diagnostics.
+ARCHIVE_LOG="$BUILD_DIR/xcodebuild-archive.log"
 xcodebuild \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
@@ -84,11 +108,15 @@ xcodebuild \
   DEVELOPMENT_TEAM="$TEAM_ID" \
   CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
   CODE_SIGN_STYLE=Manual \
-  archive \
-  | grep -E "^\*\* |error:|warning:" || true
+  archive > "$ARCHIVE_LOG" 2>&1 || {
+    echo "ERROR: archive failed — see $ARCHIVE_LOG" >&2
+    grep -E "error:" "$ARCHIVE_LOG" | head -10 >&2
+    exit 1
+  }
+grep -E "^\*\* " "$ARCHIVE_LOG" || true
 
 if [[ ! -d "$ARCHIVE_PATH" ]]; then
-  echo "ERROR: archive missing — xcodebuild failed." >&2
+  echo "ERROR: archive missing — xcodebuild failed (see $ARCHIVE_LOG)." >&2
   exit 1
 fi
 
@@ -107,15 +135,20 @@ cat > "$EXPORT_OPTS" <<EOF
 </dict></plist>
 EOF
 
+EXPORT_LOG="$BUILD_DIR/xcodebuild-export.log"
 xcodebuild -exportArchive \
   -archivePath "$ARCHIVE_PATH" \
   -exportPath "$EXPORT_PATH" \
-  -exportOptionsPlist "$EXPORT_OPTS" \
-  | grep -E "^\*\* |error:|warning:" || true
+  -exportOptionsPlist "$EXPORT_OPTS" > "$EXPORT_LOG" 2>&1 || {
+    echo "ERROR: export failed — see $EXPORT_LOG" >&2
+    grep -E "error:" "$EXPORT_LOG" | head -10 >&2
+    exit 1
+  }
+grep -E "^\*\* " "$EXPORT_LOG" || true
 
 readonly EXPORTED_APP="$EXPORT_PATH/$APP_NAME"
 if [[ ! -d "$EXPORTED_APP" ]]; then
-  echo "ERROR: exported .app missing." >&2
+  echo "ERROR: exported .app missing (see $EXPORT_LOG)." >&2
   exit 1
 fi
 
@@ -129,9 +162,24 @@ readonly NOTARY_ZIP="$BUILD_DIR/$SCHEME.zip"
 ditto -c -k --keepParent "$EXPORTED_APP" "$NOTARY_ZIP"
 
 echo "==> Submitting to Apple notary service (this typically takes 1–5 min)"
+NOTARY_LOG="$BUILD_DIR/notarytool.log"
 xcrun notarytool submit "$NOTARY_ZIP" \
   --keychain-profile "$NOTARY_PROFILE" \
-  --wait
+  --wait | tee "$NOTARY_LOG"
+
+# notarytool's exit status has historically been 0 even on an
+# "Invalid" verdict — the stapler step below would then fail with
+# a cryptic error and no notary log. Check the verdict explicitly
+# and fetch the detailed log on rejection.
+if ! grep -q "status: Accepted" "$NOTARY_LOG"; then
+  echo "ERROR: notarization not accepted — fetching notary log" >&2
+  SUBMISSION_ID="$(grep -m1 "id:" "$NOTARY_LOG" | awk '{print $2}')"
+  if [[ -n "$SUBMISSION_ID" ]]; then
+    xcrun notarytool log "$SUBMISSION_ID" \
+      --keychain-profile "$NOTARY_PROFILE" >&2 || true
+  fi
+  exit 1
+fi
 
 # --- Staple ---------------------------------------------------
 

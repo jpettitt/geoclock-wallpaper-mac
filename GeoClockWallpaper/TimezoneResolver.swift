@@ -81,10 +81,28 @@ final class TimezoneResolver {
   /// Add a work item to the serial queue and drain. Work items
   /// receive a `done` callback they must invoke exactly once
   /// when CLGeocoder has finished — that releases the next item.
+  /// A watchdog also calls done after `requestTimeout` so a
+  /// CLGeocoder callback that never fires (observed with some
+  /// network states) can't stall the whole queue forever — the
+  /// done path is idempotent per request via the `completed`
+  /// flag, so a late real callback is a harmless no-op.
+  private let requestTimeout: TimeInterval = 15
+
   private func enqueue(_ work: @escaping (_ done: @escaping () -> Void) -> Void) {
     DispatchQueue.main.async { [weak self] in
       guard let self = self else { return }
-      self.queue.append { work { [weak self] in self?.finishCurrent() } }
+      self.queue.append { [weak self] in
+        var completed = false
+        let done = {
+          guard !completed else { return }
+          completed = true
+          self?.finishCurrent()
+        }
+        DispatchQueue.main.asyncAfter(
+          deadline: .now() + (self?.requestTimeout ?? 15)
+        ) { done() }
+        work(done)
+      }
       self.drain()
     }
   }

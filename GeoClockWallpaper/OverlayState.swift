@@ -137,7 +137,7 @@ final class OverlayState: ObservableObject {
   /// individual flat `@Published` fields above (kept for
   /// readability in views that don't need the per-display
   /// override system), and gives views that DO need it access
-  /// to `perDisplaySettings` for `resolvedConfig(forScreen:)`.
+  /// to `perDisplaySettings` for `config.resolved(forDisplay:)`.
   @Published var config: WallpaperConfig = .defaults
 
   /// UUID of the display the Settings window is currently
@@ -172,16 +172,6 @@ final class OverlayState: ObservableObject {
   func updateCenterLon(_ value: Double) {
     currentCenterLon = value
     if !hasInitialRender { hasInitialRender = true }
-  }
-
-  /// Resolve the config a specific overlay should render with.
-  /// Folds the per-display overrides keyed by the screen's UUID
-  /// onto the global config. Falls back to the global config
-  /// when per-display mode is off, the screen has no UUID, or
-  /// the screen has no per-display entry.
-  func resolvedConfig(forScreen screen: NSScreen) -> WallpaperConfig {
-    let uuid = DisplayIdentity.uuidString(of: screen)
-    return config.resolved(forDisplay: uuid)
   }
 
   func applyConfig(_ cfg: WallpaperConfig) {

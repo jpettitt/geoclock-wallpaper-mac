@@ -67,17 +67,28 @@ struct PerDisplayConfigView: View {
       }
 
       Section("Markers — this display only") {
-        Text("Each display can keep its own marker list. Start fresh, or copy the global markers as a starting point.")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-        if markersBinding.wrappedValue.isEmpty {
+        if perDisplay()?.markers == nil {
+          // Inherit state: this display shows the global marker
+          // list untouched. Customizing forks a copy (or starts
+          // empty) — from then on edits here don't affect other
+          // displays.
+          Text("This display inherits the global markers (\(store.config.markers.count)). Customize to give it its own list.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
           HStack {
-            Button("Add marker") { addMarker() }
-            Button("Copy from global") { copyGlobalMarkers() }
+            Button("Customize — copy global markers") { copyGlobalMarkers() }
               .disabled(store.config.markers.isEmpty)
+            Button("Customize — start empty") {
+              markersBinding.wrappedValue = []
+            }
           }
         } else {
-          ForEach(markersBinding) { $marker in
+          if markersBinding.wrappedValue.isEmpty {
+            Text("No markers on this display.")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+          ForEach(customMarkersBinding) { $marker in
             let markerID = marker.id
             MarkerRow(
               marker: $marker,
@@ -88,8 +99,16 @@ struct PerDisplayConfigView: View {
               })
             Divider()
           }
-          Button(action: addMarker) {
-            Label("Add marker", systemImage: "plus")
+          HStack {
+            Button(action: addMarker) {
+              Label("Add marker", systemImage: "plus")
+            }
+            Button("Revert to global markers") {
+              var s = store.config.perDisplaySettings[displayUUID]
+                ?? PerDisplaySettings()
+              s.markers = nil
+              setOrPrune(s)
+            }
           }
         }
       }
@@ -276,7 +295,7 @@ struct PerDisplayConfigView: View {
       pd.showUTC != nil ||
       pd.showHomeMarker != nil ||
       pd.homeLabel != nil ||
-      !pd.markers.isEmpty
+      pd.markers != nil
   }
 
   // MARK: – Bindings
@@ -291,6 +310,9 @@ struct PerDisplayConfigView: View {
   /// display's `PerDisplaySettings`. Setting the binding to nil
   /// reverts that field to inherited; setting to a concrete
   /// value materialises a `PerDisplaySettings` entry if needed.
+  /// Entries that end up with no overrides at all are pruned so
+  /// "select a picker then put it back to Inherit" doesn't leave
+  /// junk entries in the persisted config.
   private func override<T>(
     _ kp: WritableKeyPath<PerDisplaySettings, T?>
   ) -> Binding<T?> {
@@ -300,9 +322,19 @@ struct PerDisplayConfigView: View {
         var s = store.config.perDisplaySettings[displayUUID]
           ?? PerDisplaySettings()
         s[keyPath: kp] = newValue
-        store.config.perDisplaySettings[displayUUID] = s
+        setOrPrune(s)
       }
     )
+  }
+
+  /// Store the settings entry, or remove it entirely when every
+  /// field reverted to inherit.
+  private func setOrPrune(_ s: PerDisplaySettings) {
+    if s.isEmpty {
+      store.config.perDisplaySettings.removeValue(forKey: displayUUID)
+    } else {
+      store.config.perDisplaySettings[displayUUID] = s
+    }
   }
 
   /// String-typed override with a fallback (the inherited
@@ -345,9 +377,10 @@ struct PerDisplayConfigView: View {
     }
   }
 
-  /// Markers list as a regular non-optional Binding — the
-  /// per-display marker list replaces the global one for this
-  /// display, so it's not Optional.
+  /// Markers list as a non-optional Binding over this display's
+  /// CUSTOMIZED list. Only used by UI shown when the override is
+  /// non-nil; writing through it (re)materialises the override.
+  /// Reading while still inheriting returns [] defensively.
   private var markersBinding: Binding<[Marker]> {
     Binding(
       get: { store.config.perDisplaySettings[displayUUID]?.markers ?? [] },
@@ -360,6 +393,10 @@ struct PerDisplayConfigView: View {
     )
   }
 
+  /// Same data as `markersBinding` — alias kept separate so the
+  /// ForEach call site reads clearly as "the customized list".
+  private var customMarkersBinding: Binding<[Marker]> { markersBinding }
+
   // MARK: – Actions
 
   private func addMarker() {
@@ -369,7 +406,9 @@ struct PerDisplayConfigView: View {
   private func deleteMarker(id: UUID) {
     var s = store.config.perDisplaySettings[displayUUID]
       ?? PerDisplaySettings()
-    s.markers.removeAll { $0.id == id }
+    var list = s.markers ?? []
+    list.removeAll { $0.id == id }
+    s.markers = list
     store.config.perDisplaySettings[displayUUID] = s
   }
 

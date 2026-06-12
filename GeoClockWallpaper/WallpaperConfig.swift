@@ -244,10 +244,14 @@ struct WallpaperConfig: Codable, Equatable {
     if let v = pd.showUTC { out.showUTC = v }
     if let v = pd.showHomeMarker { out.showHomeMarker = v }
     if let v = pd.homeLabel { out.homeLabel = v }
-    // Markers always replaced when a per-display entry exists,
-    // even when its list is empty — empty means "no markers on
-    // this screen", which is a valid choice.
-    out.markers = pd.markers
+    // Markers follow the same Optional semantics as every other
+    // field: nil inherits the global list; non-nil replaces it
+    // entirely — INCLUDING the explicit empty list, which means
+    // "no markers on this screen". (Markers used to be
+    // non-optional here, and any unrelated override silently
+    // wiped the display's markers when the settings entry was
+    // first materialized.)
+    if let v = pd.markers { out.markers = v }
     return out
   }
 }

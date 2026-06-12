@@ -15,6 +15,12 @@ final class Scheduler {
   private var interval: TimeInterval
   private let onFire: () -> Void
   private var wakeObserver: NSObjectProtocol?
+  /// Explicit pause flag. Killing the timer alone wasn't enough:
+  /// the wake-from-sleep observer stays registered and used to
+  /// call onFire() unconditionally — so a PAUSED app re-rendered
+  /// the wallpaper on every wake, overriding the user's explicit
+  /// choice (which auto-behaviors are documented NOT to do).
+  private var isPaused = false
 
   init(interval: TimeInterval, onFire: @escaping () -> Void) {
     self.interval = max(60, min(interval, 3600))
@@ -27,11 +33,13 @@ final class Scheduler {
   }
 
   func pause() {
+    isPaused = true
     timer?.invalidate()
     timer = nil
   }
 
   func resume() {
+    isPaused = false
     guard timer == nil else { return }
     scheduleTimer()
   }
@@ -78,8 +86,10 @@ final class Scheduler {
     ) { [weak self] _ in
       // Fire immediately on wake, then let the regular timer
       // schedule pick up from here. Stale-frame avoidance is the
-      // whole point of registering this observer.
-      self?.onFire()
+      // whole point of registering this observer — but an
+      // explicit user pause beats it.
+      guard let self = self, !self.isPaused else { return }
+      self.onFire()
     }
   }
 }

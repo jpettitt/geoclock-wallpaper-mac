@@ -74,9 +74,12 @@ final class OverlayLayer {
 
     // Drop windows for displays that no longer exist OR that
     // the user has just disabled.
-    for (id, win) in windowsByDisplay where !enabledIDs.contains(id) {
-      win.orderOut(nil)
-      windowsByDisplay.removeValue(forKey: id)
+    let staleIDs = windowsByDisplay.keys.filter { !enabledIDs.contains($0) }
+    for id in staleIDs {
+      if let win = windowsByDisplay[id] {
+        win.orderOut(nil)
+        windowsByDisplay.removeValue(forKey: id)
+      }
     }
 
     // Add or refresh windows for current enabled screens. For a
@@ -88,10 +91,12 @@ final class OverlayLayer {
       let win: NSWindow
       if let existing = windowsByDisplay[id] {
         existing.setFrame(screen.frame, display: true)
-        let host = NSHostingController(
+        // NSHostingView directly — the view owns the SwiftUI
+        // graph, no orphaned controller (see OverlayWindowFactory).
+        let host = NSHostingView(
           rootView: AnyView(OverlayView(state: state, screen: screen)))
-        host.view.frame = NSRect(origin: .zero, size: screen.frame.size)
-        existing.contentView = host.view
+        host.frame = NSRect(origin: .zero, size: screen.frame.size)
+        existing.contentView = host
         win = existing
       } else {
         win = OverlayWindowFactory.make(for: screen, state: state)

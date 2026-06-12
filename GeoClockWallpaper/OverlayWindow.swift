@@ -58,13 +58,15 @@ enum OverlayWindowFactory {
     window.isExcludedFromWindowsMenu = true
     window.hidesOnDeactivate = false
 
-    // Host the SwiftUI content. We wrap in AnyView so the
-    // hosting controller's generic type doesn't escape into
-    // OverlayLayer's storage.
+    // Host the SwiftUI content. NSHostingView directly (rather
+    // than extracting .view from an NSHostingController and
+    // dropping the controller) — the view owns the SwiftUI graph
+    // itself, so there's no reliance on the undocumented detail
+    // that the orphaned controller's view keeps working.
     let root = OverlayView(state: state, screen: screen)
-    let hosting = NSHostingController(rootView: AnyView(root))
-    hosting.view.frame = NSRect(origin: .zero, size: screen.frame.size)
-    window.contentView = hosting.view
+    let hosting = NSHostingView(rootView: AnyView(root))
+    hosting.frame = NSRect(origin: .zero, size: screen.frame.size)
+    window.contentView = hosting
 
     return window
   }

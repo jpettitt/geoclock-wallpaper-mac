@@ -20,32 +20,33 @@ final class ConfigStore: ObservableObject {
 
   /// Update interval as a read-through to `config.updateInterval`
   /// so AppDelegate's existing Combine subscription doesn't change
-  /// shape. Same pattern for `paused`. These will go once we
-  /// migrate the subscribers to observe `$config` directly.
+  /// shape. This will go once the subscribers observe `$config`
+  /// directly.
   var updateInterval: Int {
     get { config.updateInterval }
     set { config.updateInterval = max(60, min(newValue, 3600)) }
   }
 
-  @Published var paused: Bool {
-    didSet {
-      if paused != config.paused {
-        config.paused = paused
-      }
-    }
+  /// Read-through to `config.paused` — `config` is the single
+  /// source of truth. This USED to be a separate `@Published`
+  /// mirror with one-way didSet sync, and the Settings toggle
+  /// (bound straight to `config.paused`) desynced it: the menu
+  /// bar item read the stale mirror, and toggling it became a
+  /// no-op because the mirror's didSet saw "already equal" and
+  /// never wrote back.
+  var paused: Bool {
+    get { config.paused }
+    set { config.paused = newValue }
   }
 
   // MARK: – Persistence
 
   private let defaults: UserDefaults
   private let key = "wallpaperConfig.v1"
-  private var ignorePersistedChanges = false
 
   private init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
-    let loaded = Self.load(from: defaults, key: "wallpaperConfig.v1")
-    self.config = loaded
-    self.paused = loaded.paused
+    self.config = Self.load(from: defaults, key: "wallpaperConfig.v1")
   }
 
   /// Decode the persisted config from UserDefaults, or return the
@@ -71,13 +72,28 @@ final class ConfigStore: ObservableObject {
     }
   }
 
+  /// Debounce handle for persist(). Sliders and color pickers
+  /// fire a config mutation per drag tick, and each one was a
+  /// full JSON encode + UserDefaults write. Coalescing to one
+  /// write 300 ms after the last change keeps the disk quiet
+  /// without risking data: UserDefaults itself also flushes on
+  /// app termination, and 300 ms of lost edits on a hard kill
+  /// is an acceptable trade for an alpha.
+  private var persistWork: DispatchWorkItem?
+
   private func persist() {
-    do {
-      let data = try JSONEncoder().encode(config)
-      defaults.set(data, forKey: key)
-    } catch {
-      NSLog("ConfigStore: failed to encode config: %@", "\(error)")
+    persistWork?.cancel()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self = self else { return }
+      do {
+        let data = try JSONEncoder().encode(self.config)
+        self.defaults.set(data, forKey: self.key)
+      } catch {
+        NSLog("ConfigStore: failed to encode config: %@", "\(error)")
+      }
     }
+    persistWork = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
   }
 
   /// Reset to the documented defaults. Wired to a button in
@@ -89,8 +105,7 @@ final class ConfigStore: ObservableObject {
   /// the home dot keeps haunting the same spot). The next
   /// real CoreLocation fix will refill the coordinate.
   func resetToDefaults() {
-    config = .defaults
-    paused = false
+    config = .defaults  // includes paused = false
     LocationService.shared.clearCachedFix()
   }
 

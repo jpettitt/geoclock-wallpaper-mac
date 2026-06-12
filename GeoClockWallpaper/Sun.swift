@@ -48,17 +48,12 @@ enum Sun {
     let alpha = atan2(cos(epsilon) * sin(lambda), cos(lambda)) * RAD
     let eotDeg = wrap180(L - alpha)
 
-    let cal = Calendar(identifier: .gregorian)
-    var c = cal
-    c.timeZone = TimeZone(identifier: "UTC")!
-    let comps = c.dateComponents(
-      [.hour, .minute, .second, .nanosecond],
-      from: date)
-    let utcHours =
-      Double(comps.hour ?? 0)
-      + Double(comps.minute ?? 0) / 60
-      + Double(comps.second ?? 0) / 3600
-      + Double(comps.nanosecond ?? 0) / 1_000_000_000 / 3600
+    let secondsInDay = 86400.0
+    var secondsSinceMidnight = date.timeIntervalSince1970.truncatingRemainder(dividingBy: secondsInDay)
+    if secondsSinceMidnight < 0 {
+      secondsSinceMidnight += secondsInDay
+    }
+    let utcHours = secondsSinceMidnight / 3600.0
 
     let lon = wrap180(-15 * (utcHours - 12) - eotDeg)
     return SubsolarPoint(lat: declination, lon: lon)

@@ -21,15 +21,33 @@ struct OverlayView: View {
 
   @ObservedObject var state: OverlayState
   let screen: NSScreen
+  /// Display identity, resolved ONCE at view construction. The
+  /// screen a given OverlayView serves never changes (OverlayLayer
+  /// rebuilds the hosting view on reconfiguration), but the
+  /// computed-property version of these re-ran
+  /// CGDisplayCreateUUIDFromDisplayID + CFUUIDCreateString several
+  /// times per body pass — at 1 Hz across every screen, all of it
+  /// redundant CF round-tripping.
+  private let displayID: CGDirectDisplayID?
+  private let displayUUID: String?
+
+  init(state: OverlayState, screen: NSScreen) {
+    self.state = state
+    self.screen = screen
+    self.displayID = DisplayIdentity.id(of: screen)
+    self.displayUUID = self.displayID.flatMap {
+      DisplayIdentity.uuidString(forID: $0)
+    }
+  }
 
   /// Per-screen effective config. Folds any
   /// `perDisplaySettings[uuid]` overrides on top of the global
   /// `WallpaperConfig`. Read every field through this rather
   /// than `state.X` so the per-display system actually changes
-  /// what this overlay renders. Recomputed on each body pass
-  /// (cheap struct copy with a dict lookup).
+  /// what this overlay renders. One struct fold per body pass
+  /// (uuid pre-resolved at init).
   private var resolved: WallpaperConfig {
-    state.resolvedConfig(forScreen: screen)
+    state.config.resolved(forDisplay: displayUUID)
   }
 
   /// CenterLon for this screen's wallpaper render. Each
@@ -38,8 +56,7 @@ struct OverlayView: View {
   /// first and only fall back to the global one when this
   /// screen hasn't been rendered yet.
   private var centerLon: Double {
-    if let id = DisplayIdentity.id(of: screen),
-       let lon = state.centerLonsByDisplay[id] {
+    if let id = displayID, let lon = state.centerLonsByDisplay[id] {
       return lon
     }
     return state.currentCenterLon
@@ -144,7 +161,7 @@ struct OverlayView: View {
   /// `state.wallpaperImages` so we don't crop a 21:9 ultrawide
   /// render across a 16:9 secondary.
   private var wallpaperImage: NSImage? {
-    guard let id = DisplayIdentity.id(of: screen) else { return nil }
+    guard let id = displayID else { return nil }
     return state.wallpaperImages[id]
   }
 
@@ -177,7 +194,9 @@ struct OverlayView: View {
     // (typically 1; up to 3 in a letterbox bar layout where the
     // map repeats into the side bars).
     if resolved.showHomeMarker, let home = state.homeCoordinate {
-      let pts = projectionPoints(lat: home.latitude, lon: home.longitude)
+      let ctx = screenContext(resolved)
+      let pts = projectionPoints(
+        lat: home.latitude, lon: home.longitude, in: ctx)
       ForEach(Array(pts.enumerated()), id: \.offset) { _, pt in
         MarkerDot(
           color: homeColor(at: home),
@@ -223,11 +242,15 @@ struct OverlayView: View {
     // Each marker is drawn once per visible wrap-tile copy so
     // a marker whose longitude appears twice on screen
     // (letterbox bars showing the wrapped day image) also
-    // appears twice.
-    ForEach(resolved.markers.filter {
+    // appears twice. Config + projection context resolved once
+    // for the whole loop, not per marker.
+    let cfg = resolved
+    let ctx = screenContext(cfg)
+    return ForEach(cfg.markers.filter {
       $0.latitude != 0 || $0.longitude != 0
     }) { m in
-      let pts = projectionPoints(lat: m.latitude, lon: m.longitude)
+      let pts = projectionPoints(
+        lat: m.latitude, lon: m.longitude, in: ctx)
       ForEach(Array(pts.enumerated()), id: \.offset) { _, pt in
         MarkerDot(
           color: markerColor(for: m),
@@ -337,18 +360,18 @@ struct OverlayView: View {
 
   // MARK: – Helpers
 
-  private func projection(lat: Double, lon: Double) -> CGPoint? {
-    let ctx = Projection.ScreenContext(
+  /// Build this screen's projection context from an
+  /// already-resolved config. Callers that project several
+  /// points in one pass (the marker loops) build this ONCE and
+  /// reuse it — re-resolving the config per marker per 1 Hz tick
+  /// added up across screens.
+  private func screenContext(_ cfg: WallpaperConfig) -> Projection.ScreenContext {
+    Projection.ScreenContext(
       screen: screen.frame.size,
-      imageSize: self.wallpaperImage?.size ?? screen.frame.size,
-      aspect: resolved.aspectFit,
+      imageSize: wallpaperImage?.size ?? screen.frame.size,
+      aspect: cfg.aspectFit,
       menuBarHeight: state.menuBarHeight,
-      bandVisible: resolved.showTimezoneBand
-    )
-    return Projection.screenPoint(
-      lat: lat, lon: lon,
-      centerLon: centerLon,
-      in: ctx
+      bandVisible: cfg.showTimezoneBand
     )
   }
 
@@ -358,15 +381,11 @@ struct OverlayView: View {
   /// so a marker whose longitude is rendered twice on screen
   /// should be drawn twice too. Returns 1 point in the typical
   /// "single visible wrap" case (cropOverflow, or aspect matched).
-  private func projectionPoints(lat: Double, lon: Double) -> [CGPoint] {
-    let ctx = Projection.ScreenContext(
-      screen: screen.frame.size,
-      imageSize: self.wallpaperImage?.size ?? screen.frame.size,
-      aspect: resolved.aspectFit,
-      menuBarHeight: state.menuBarHeight,
-      bandVisible: resolved.showTimezoneBand
-    )
-    return Projection.screenPoints(
+  private func projectionPoints(
+    lat: Double, lon: Double,
+    in ctx: Projection.ScreenContext
+  ) -> [CGPoint] {
+    Projection.screenPoints(
       lat: lat, lon: lon,
       centerLon: centerLon,
       in: ctx
@@ -374,10 +393,7 @@ struct OverlayView: View {
   }
 
   private func formatTime(in tz: TimeZone) -> String {
-    let f = DateFormatter()
-    f.locale = .current
-    f.timeZone = tz
-    f.timeStyle = .short
+    let f = FormatterCache.timeFormatter(for: tz)
     return f.string(from: state.now)
   }
 
@@ -400,13 +416,85 @@ struct OverlayView: View {
       parts.append(formatTime(in: tz))
     }
     if showDate {
-      let f = DateFormatter()
-      f.locale = .current
-      f.timeZone = tz
-      f.dateFormat = "EEE"
+      let f = FormatterCache.dayFormatter(for: tz)
       parts.append(f.string(from: state.now))
     }
     return parts.isEmpty ? nil : parts.joined(separator: " ")
+  }
+}
+
+// MARK: – Formatter Cache
+
+private struct FormatterCache {
+  private static let lock = NSLock()
+  private static var timeFormatters: [TimeZone: DateFormatter] = [:]
+  private static var dayFormatters: [TimeZone: DateFormatter] = [:]
+
+  static func timeFormatter(for tz: TimeZone) -> DateFormatter {
+    lock.lock()
+    defer { lock.unlock() }
+    let currentLocale = Locale.current
+    if let cached = timeFormatters[tz], cached.locale == currentLocale {
+      return cached
+    }
+    let f = DateFormatter()
+    f.locale = currentLocale
+    f.timeZone = tz
+    f.timeStyle = .short
+    timeFormatters[tz] = f
+    return f
+  }
+
+  static func dayFormatter(for tz: TimeZone) -> DateFormatter {
+    lock.lock()
+    defer { lock.unlock() }
+    let currentLocale = Locale.current
+    if let cached = dayFormatters[tz], cached.locale == currentLocale {
+      return cached
+    }
+    let f = DateFormatter()
+    f.locale = currentLocale
+    f.timeZone = tz
+    f.dateFormat = "EEE"
+    dayFormatters[tz] = f
+    return f
+  }
+
+  private static var secondsFormatters: [TimeZone: DateFormatter] = [:]
+  private static var utcFormatter: DateFormatter?
+
+  /// Seconds-precision wall-clock formatter for the main clock
+  /// readout. `timeStyle = .medium` is the locale-aware "h:mm:ss"
+  /// form — 24-hour locales (and the System Settings 24-hour
+  /// override) render 24h automatically, unlike the hardcoded
+  /// "h:mm:ss a" pattern this replaces.
+  static func clockFormatter(for tz: TimeZone) -> DateFormatter {
+    lock.lock()
+    defer { lock.unlock() }
+    let currentLocale = Locale.current
+    if let cached = secondsFormatters[tz], cached.locale == currentLocale {
+      return cached
+    }
+    let f = DateFormatter()
+    f.locale = currentLocale
+    f.timeZone = tz
+    f.timeStyle = .medium
+    secondsFormatters[tz] = f
+    return f
+  }
+
+  /// Fixed-format UTC line. Locale-independent by design
+  /// (en_US_POSIX), so one shared instance is safe forever.
+  static func utcClockFormatter() -> DateFormatter {
+    lock.lock()
+    defer { lock.unlock() }
+    if let f = utcFormatter { return f }
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.timeZone = TimeZone(identifier: "UTC")
+    f.dateFormat = "HH:mm:ss 'UTC'"
+    utcFormatter = f
+    return f
   }
 }
 
@@ -541,23 +629,19 @@ private struct ClockBlock: View {
     }
   }
 
-  /// Local time in the user's preferred tz. The OverlayState's
-  /// `clockSource` says where that tz comes from.
+  /// Local time in the user's preferred tz, locale-aware
+  /// (timeStyle .medium follows the 24-hour locale/System
+  /// Settings preference, matching the marker times). Cached —
+  /// the previous version allocated a fresh DateFormatter every
+  /// 1 Hz tick on every screen, the most expensive Foundation
+  /// object to construct.
   private var formattedLocalTime: String {
     let tz = resolveClockTimezone()
-    let f = DateFormatter()
-    f.locale = .current
-    f.timeZone = tz
-    f.dateFormat = "h:mm:ss a"
-    return f.string(from: state.now)
+    return FormatterCache.clockFormatter(for: tz).string(from: state.now)
   }
 
   private var formattedUTC: String {
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "en_US_POSIX")
-    f.timeZone = TimeZone(identifier: "UTC")
-    f.dateFormat = "HH:mm:ss 'UTC'"
-    return f.string(from: state.now)
+    FormatterCache.utcClockFormatter().string(from: state.now)
   }
 
   private func resolveClockTimezone() -> TimeZone {

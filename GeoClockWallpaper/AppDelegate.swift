@@ -11,14 +11,21 @@ import SwiftUI
 ///   ConfigStore   ─┐
 ///       │         │ publishes user-config changes
 ///       ▼         ▼
-///   WallpaperRenderer  ─→  PNG file URL
+///   WallpaperRenderer ─→ in-memory NSImage per display
 ///       ▲                        │
 ///       │ trigger                ▼
-///   Scheduler             WallpaperApplier (NSWorkspace)
+///   Scheduler             OverlayState.wallpaperImages
+///                                │
+///                                ▼
+///                  OverlayLayer windows (image + live markers)
+///
+/// (The old `WallpaperApplier` / `setDesktopImageURL` delivery
+/// path still compiles — flip `WallpaperRenderer.writePNGToDisk`
+/// and re-instantiate it here to restore "macOS owns the
+/// wallpaper" mode.)
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private var statusItem: NSStatusItem!
   private let renderer = WallpaperRenderer()
-  private let applier = WallpaperApplier()
   private var scheduler: Scheduler!
   private var cancellables: Set<AnyCancellable> = []
   private let config = ConfigStore.shared
@@ -364,6 +371,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let label: String  // localizedName for logs
   }
 
+  /// Single-flight state for the per-screen render chain. The
+  /// renderer itself rejects overlapping render() calls with
+  /// `.alreadyInFlight`, but BEFORE this guard existed a second
+  /// updateWallpaper() (scheduler tick during a slow cold render,
+  /// or a debounced config edit mid-chain) would start its own
+  /// chain anyway: every one of its renders failed
+  /// `.alreadyInFlight` in milliseconds and the user's edit was
+  /// silently dropped — stale wallpaper until the next scheduler
+  /// tick, up to an hour at max interval. Instead we run exactly
+  /// one chain at a time and remember that a rerun was requested;
+  /// the active chain triggers the rerun when it drains, so the
+  /// latest config always renders.
+  private var updateChainActive = false
+  private var updateRerunRequested = false
+
   /// Render the wallpaper once per connected (and enabled)
   /// display, then hand each image to the overlay layer keyed
   /// by `CGDirectDisplayID`. Renders are serialised because the
@@ -375,10 +397,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   /// sees progressive updates instead of one long stall.
   private func updateWallpaper() {
     Diagnostics.log("updateWallpaper() called")
+    guard !updateChainActive else {
+      // A chain is mid-flight; rerun with fresh config when it
+      // drains rather than racing it for the single WKWebView.
+      updateRerunRequested = true
+      Diagnostics.log("  chain active — rerun queued")
+      return
+    }
+    updateChainActive = true
     // Apply the global config + the global centerLon up front
     // so single-screen callers (and tests of the legacy path)
     // still see something sensible. Per-display centerLons are
-    // recorded as each target's render lands below.
+    // committed alongside each display's image as it lands.
     let globalPayload = config.buildWallpaperPayload()
     overlayState.updateCenterLon(globalPayload.centerLon)
     overlayState.applyConfig(config.config)
@@ -415,9 +445,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // overlayState.wallpaperImages from leaking across config
     // changes.
     let activeIDs = Set(targets.map(\.displayID))
-    for staleID in overlayState.wallpaperImages.keys
-                    where !activeIDs.contains(staleID) {
+    let staleIDs = overlayState.wallpaperImages.keys.filter { !activeIDs.contains($0) }
+    for staleID in staleIDs {
       overlayState.wallpaperImages.removeValue(forKey: staleID)
+    }
+    // Sweep centerLons alongside the images — a replugged display
+    // whose CGDirectDisplayID got reassigned must not inherit
+    // another display's stale centering.
+    let staleLons = overlayState.centerLonsByDisplay.keys.filter { !activeIDs.contains($0) }
+    for staleID in staleLons {
+      overlayState.centerLonsByDisplay.removeValue(forKey: staleID)
     }
 
     Diagnostics.log(String(format:
@@ -436,12 +473,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   /// screen's `centerMode` / `aspectFit` / marker list takes
   /// effect), hand it to the renderer with its screen size, and
   /// on completion (success or failure) advance to the next
-  /// target. Stops cleanly when the list is exhausted.
+  /// target. When the list drains, release the single-flight
+  /// latch and rerun if an update arrived mid-chain.
   private func renderNextTarget(
     targets: [ScreenRenderTarget],
     index: Int
   ) {
-    guard index < targets.count else { return }
+    guard index < targets.count else {
+      updateChainActive = false
+      if updateRerunRequested {
+        updateRerunRequested = false
+        Diagnostics.log("  chain drained — running queued update")
+        updateWallpaper()
+      }
+      return
+    }
     let target = targets[index]
 
     // Build a payload for THIS display. When per-display mode
@@ -449,7 +495,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // payload — same as the old code path.
     let payload = config.buildWallpaperPayload(
       forDisplay: target.displayUUID)
-    overlayState.centerLonsByDisplay[target.displayID] = payload.centerLon
 
     Diagnostics.log(String(format:
       "render [%d/%d] '%@' (%.0fx%.0f) centerLon=%.4f",
@@ -474,7 +519,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
           "  render done '%@' NSImage.size=%.0fx%.0f",
           target.label,
           output.image.size.width, output.image.size.height))
+        // Image and centerLon flip together. Committing the
+        // centerLon before the render (as this used to) made the
+        // overlay project markers against the NEW longitude while
+        // still showing the OLD bitmap — a visible double-jump on
+        // every centerMode change, and a persistent mismatch when
+        // the render failed.
         self.overlayState.wallpaperImages[target.displayID] = output.image
+        self.overlayState.centerLonsByDisplay[target.displayID] = payload.centerLon
       case .failure(let error):
         Diagnostics.log(
           "  render failed '\(target.label)' — \(error)")

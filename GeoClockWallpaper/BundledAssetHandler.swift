@@ -55,6 +55,16 @@ final class BundledAssetHandler: NSObject, WKURLSchemeHandler {
     }
     let trimmed = String(relativePath.drop(while: { $0 == "/" }))
 
+    // Refuse traversal segments outright. Only the bundled,
+    // trusted page runs in this web view and the sandbox caps
+    // reads anyway, but there's no legitimate reason for a
+    // geoclock-app:// URL to contain ".." and CFBundle would
+    // happily resolve a composed path outside WebAssets/.
+    guard !trimmed.split(separator: "/").contains("..") else {
+      urlSchemeTask.didFailWithError(SchemeError.unsupportedURL)
+      return
+    }
+
     guard
       let fileURL = Bundle.main.url(
         forResource: trimmed,

@@ -114,6 +114,7 @@ final class WallpaperRenderer: NSObject {
   // MARK: – State
 
   private var webView: WKWebView?
+  private var renderCount = 0
   /// True once the wallpaper.html page has fully loaded (the
   /// initial navigation completed). Subsequent renders reuse the
   /// loaded page — they just call geoclockConfigure on the
@@ -138,6 +139,10 @@ final class WallpaperRenderer: NSObject {
   /// projection math. nil → leave the card's default
   /// ("xMidYMid slice") alone.
   private var preserveAspectRatioOverride: String?
+  /// centerLon of the render in flight, captured off the payload
+  /// for the debug grid (which must NOT read hass.config.longitude
+  /// — unset in manual centering mode).
+  private var debugCenterLon: Double = 0
 
   // MARK: – Public API
 
@@ -176,6 +181,8 @@ final class WallpaperRenderer: NSObject {
       // aspect-fit mode.
       self.preserveAspectRatioOverride =
         Self.preserveAspectRatio(for: config.aspectFit)
+      self.debugCenterLon =
+        (payload.config["centerLongitude"] as? Double) ?? 0
       self.beginRender(config: payload.config, hass: payload.hass)
     }
   }
@@ -206,14 +213,20 @@ final class WallpaperRenderer: NSObject {
         name: "geoclockReady"
       )
 
-      let nav = WebViewNavigationDelegate { [weak self] error in
+      let nav = WebViewNavigationDelegate(renderer: self) { [weak self, weak webView] error in
         guard let self = self else { return }
         if error == nil {
           self.webViewPageLoaded = true
           Diagnostics.log("prewarm — page loaded")
         } else {
           // Couldn't load. Tear down so the next render rebuilds
-          // from scratch instead of stumbling over a half-state.
+          // from scratch instead of stumbling over a half-state —
+          // but ONLY if our webView is still the active one. A
+          // render that started while this prewarm navigation was
+          // failing may have installed its own WebView already;
+          // nilling that out from a stale closure would hang the
+          // in-flight render until its ready timeout.
+          guard self.webView === webView else { return }
           self.webView = nil
           self.navigationDelegate = nil
           self.webViewPageLoaded = false
@@ -228,6 +241,16 @@ final class WallpaperRenderer: NSObject {
   // MARK: – Implementation
 
   private func beginRender(config: [String: Any], hass: [String: Any]) {
+    if renderCount >= 50 {
+      Diagnostics.log("Recycling WKWebView (render count: \(renderCount)) to limit memory footprint.")
+      webView?.stopLoading()
+      webView?.navigationDelegate = nil
+      webView = nil
+      webViewPageLoaded = false
+      renderCount = 0
+    }
+    renderCount += 1
+
     armReadyTimeout()
     renderStartTime = Date()
     updateRenderSize()
@@ -250,6 +273,31 @@ final class WallpaperRenderer: NSObject {
       pushConfig(config: config, hass: hass)
       return
     }
+    // Mid path: a prewarm navigation is still in flight (webView
+    // exists, page not yet loaded). Adopt it instead of throwing
+    // it away — rebuilding here wasted the exact ~5 s the prewarm
+    // exists to amortize. We swap in a render-aware navigation
+    // delegate so didFinish completes THIS render; the
+    // geoclockReady handler was already registered by prewarm.
+    if let inFlight = webView {
+      Diagnostics.log("render adopting in-flight prewarm navigation")
+      if inFlight.frame.size != renderSize {
+        inFlight.frame = NSRect(origin: .zero, size: renderSize)
+      }
+      let nav = WebViewNavigationDelegate(renderer: self) { [weak self] error in
+        guard let self = self else { return }
+        if let error = error {
+          self.finish(.failure(.navigationFailed(error)))
+        } else {
+          self.webViewPageLoaded = true
+          self.pushConfig(config: config, hass: hass)
+        }
+      }
+      self.navigationDelegate = nav
+      inFlight.navigationDelegate = nav
+      return
+    }
+
     Diagnostics.log(String(format:
       "render slow-path (cold WebView) — size %.0fx%.0f",
       renderSize.width, renderSize.height))
@@ -264,7 +312,7 @@ final class WallpaperRenderer: NSObject {
       name: "geoclockReady"
     )
 
-    let nav = WebViewNavigationDelegate { [weak self] error in
+    let nav = WebViewNavigationDelegate(renderer: self) { [weak self] error in
       guard let self = self else { return }
       if let error = error {
         self.finish(.failure(.navigationFailed(error)))
@@ -369,9 +417,6 @@ final class WallpaperRenderer: NSObject {
     if let css = cssOverridePayload, !css.isEmpty {
       injectShadowCSS(css)
     }
-    if let par = preserveAspectRatioOverride {
-      injectSVGAttribute(preserveAspectRatio: par)
-    }
     // Debug-only: 30° lat/lon mesh painted into the card's SVG
     // (green). The Swift overlay paints a magenta mesh at the
     // same step against `Projection.paintedRect`. With the
@@ -381,8 +426,18 @@ final class WallpaperRenderer: NSObject {
     // normal use — re-enable both this call and OverlayView's
     // `debugGrid` ZStack entry together when chasing alignment.
     // injectDebugGridJS()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-      self?.takeSnapshot()
+
+    // The injections above are queued JS on the page's main
+    // world and execute in order; the preserveAspectRatio
+    // injection goes LAST with a completion so the snapshot is
+    // gated on all of them having actually run rather than on a
+    // hope-it's-done timer. The small extra delay then covers
+    // the layer-commit after the final style recalc.
+    let par = preserveAspectRatioOverride
+    injectSVGAttribute(preserveAspectRatio: par ?? "xMidYMid slice") { [weak self] in
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        self?.takeSnapshot()
+      }
     }
   }
 
@@ -391,9 +446,13 @@ final class WallpaperRenderer: NSObject {
   /// viewBox coords). Latitude lines are full-width horizontals;
   /// longitude lines are stepped polylines so the seam wrap
   /// doesn't draw a bogus diagonal across the map. centerLon
-  /// is read from `hass.config.longitude` — the wallpaper page
-  /// shortcut writes `centerLongitude` into that field, so it
-  /// matches the value Swift uses for the overlay's projection.
+  /// comes from `debugCenterLon` (captured off the payload in
+  /// render()) — NOT from `card.hass.config.longitude`, which is
+  /// unset in manual centering mode (the manual path drives the
+  /// card via center:'longitude' without synthesizing a home),
+  /// where reading it rendered the grid Greenwich-centered while
+  /// the map wasn't — exactly the misalignment the grid exists
+  /// to diagnose.
   private func injectDebugGridJS() {
     guard let webView = webView else { return }
     let script = #"""
@@ -409,7 +468,7 @@ final class WallpaperRenderer: NSObject {
         const MAP_H = 1024;
         const STEP = 30;
         const wrap360 = (deg) => ((deg % 360) + 360) % 360;
-        const centerLon = card.hass?.config?.longitude ?? 0;
+        const centerLon = __CENTER_LON__;
         const leftEdgeLon = centerLon - 180;
         const lonX = (lon) => (wrap360(lon - leftEdgeLon) / 360) * MAP_W;
         const latY = (lat) => ((90 - lat) / 180) * MAP_H;
@@ -459,6 +518,9 @@ final class WallpaperRenderer: NSObject {
         svg.appendChild(g);
       })();
       """#
+      .replacingOccurrences(
+        of: "__CENTER_LON__",
+        with: String(format: "%.6f", debugCenterLon))
     webView.evaluateJavaScript(script) { _, _ in }
   }
 
@@ -466,9 +528,20 @@ final class WallpaperRenderer: NSObject {
   /// after mount. SVG attributes can't be set from CSS, so
   /// we reach into the shadow DOM with JS. Re-runs on every
   /// render — the card re-mounts the SVG on each geoclockConfigure
-  /// call, so a one-shot set wouldn't survive remounts.
-  private func injectSVGAttribute(preserveAspectRatio value: String) {
-    guard let webView = webView else { return }
+  /// call, so a one-shot set wouldn't survive remounts. The
+  /// completion fires after the script has executed; because
+  /// evaluateJavaScript calls run in submission order on the
+  /// page, "this one is done" implies all earlier injections
+  /// (document CSS, shadow CSS) are done too — that's what gates
+  /// the snapshot in didReceiveReady.
+  private func injectSVGAttribute(
+    preserveAspectRatio value: String,
+    completion: (() -> Void)? = nil
+  ) {
+    guard let webView = webView else {
+      completion?()
+      return
+    }
     let script = """
       (function() {
         const card = document.querySelector('geo-clock-card');
@@ -477,7 +550,7 @@ final class WallpaperRenderer: NSObject {
         if (svg) svg.setAttribute('preserveAspectRatio', '\(value)');
       })();
       """
-    webView.evaluateJavaScript(script) { _, _ in }
+    webView.evaluateJavaScript(script) { _, _ in completion?() }
   }
 
   /// SVG `preserveAspectRatio` value matching each aspect-fit
@@ -755,6 +828,28 @@ final class WallpaperRenderer: NSObject {
 
     completion?(result)
   }
+
+  /// Handle WebContent process termination (crash or OS OOM).
+  /// Tears down the webView, resets pageLoaded/renderCount state,
+  /// and fails any in-flight render with an appropriate error.
+  func handleWebContentProcessTermination() {
+    Diagnostics.log("WallpaperRenderer: WebContent process terminated (OOM or crash)")
+    webView?.stopLoading()
+    webView?.navigationDelegate = nil
+    webView = nil
+    webViewPageLoaded = false
+    renderCount = 0
+    navigationDelegate = nil
+    
+    if inFlight {
+      let error = NSError(
+        domain: "world.geoclock.wallpaper",
+        code: 99,
+        userInfo: [NSLocalizedDescriptionKey: "WebContent process terminated (crashed or OOM)"]
+      )
+      finish(.failure(.navigationFailed(error)))
+    }
+  }
 }
 
 // MARK: – Helpers
@@ -775,10 +870,14 @@ private final class ReadyHandler: NSObject, WKScriptMessageHandler {
 /// Same idea for navigation events — completion is called once,
 /// either with the error from didFail* or nil on didFinish.
 private final class WebViewNavigationDelegate: NSObject, WKNavigationDelegate {
+  private weak var renderer: WallpaperRenderer?
   private var completion: ((Error?) -> Void)?
-  init(completion: @escaping (Error?) -> Void) {
+  
+  init(renderer: WallpaperRenderer, completion: @escaping (Error?) -> Void) {
+    self.renderer = renderer
     self.completion = completion
   }
+  
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     completion?(nil); completion = nil
   }
@@ -795,5 +894,8 @@ private final class WebViewNavigationDelegate: NSObject, WKNavigationDelegate {
     withError error: Error
   ) {
     completion?(error); completion = nil
+  }
+  func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    renderer?.handleWebContentProcessTermination()
   }
 }
