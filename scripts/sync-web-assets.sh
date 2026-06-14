@@ -51,10 +51,17 @@ find "$DEST" -mindepth 1 -delete
 # Bundle:
 #   - the card's JS bundle and every imagery/GeoJSON file in dist/
 #   - the wallpaper.html page itself (lives in docs/web/, not dist/)
+#   - geoclock-config.js: the shared HEADLESS config module that
+#     wallpaper.html imports (expandShortcuts / mountCard helpers).
+#     Required offline or wallpaper.html's import 404s.
+# We DON'T copy geoclock-webconfig.js — that's the demo page's
+# config PANEL (markers editor, geocoding, localStorage), imported
+# only by index.html, and has no place in the wallpaper renderer.
 # We exclude *.map files: source maps are dev-only and they leak
 # code structure into the shipped app for zero runtime benefit.
 rsync -a --exclude '*.map' "$CARD_REPO/dist/" "$DEST/"
 cp "$CARD_REPO/docs/web/wallpaper.html" "$DEST/wallpaper.html"
+cp "$CARD_REPO/docs/web/geoclock-config.js" "$DEST/geoclock-config.js"
 
 # Provenance manifest: which card-repo commit and bundle hash this
 # copy came from. Makes "is the bundled card stale?" answerable
