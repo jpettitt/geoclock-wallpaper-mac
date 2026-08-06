@@ -14,14 +14,15 @@ time-source overrides, theming) flow in for free.
 
 ## Status
 
-**v0.1.0-alpha** — first signed + notarized public release.
+**v0.1.1-alpha** — signed + notarized. Adds multi-monitor /
+per-display config and updates the bundled card to v0.2.10.
 Architecture, config schema, and persisted-settings layout are
 still settling, so expect breaking changes between alpha versions.
 
 ## Install
 
 Grab `GeoClockWallpaper.zip` from the
-[v0.1.0-alpha release](https://github.com/jpettitt/geoclock-wallpaper-mac/releases/tag/v0.1.0-alpha),
+[v0.1.1-alpha release](https://github.com/jpettitt/geoclock-wallpaper-mac/releases/tag/v0.1.1-alpha),
 unzip it, and drag `GeoClockWallpaper.app` into `/Applications`.
 Signed with a Developer ID certificate and notarized by Apple, so
 macOS launches it directly — no Gatekeeper "unidentified
