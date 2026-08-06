@@ -119,6 +119,18 @@
   </div>
 
   <script type="module">
+    // Shared, headless config plumbing — same module index.html
+    // imports. `./` resolves next to THIS page in both deployments
+    // (CDN bucket root, and the app bundle's WebAssets/), so it is
+    // NOT under the versioned ASSET_BASE prefix. The macOS app
+    // bundles this file via scripts/sync-web-assets.sh.
+    import {
+      expandShortcuts,
+      loadCardBundle,
+      applyConfig,
+      waitForCardAssets,
+    } from './geoclock-config.js';
+
     // Two deployments share this file:
     //
     //   • Live demo at https://geoclock.world/wallpaper.html —
@@ -136,7 +148,7 @@
     // enforces this so the page can't silently serve an old bundle.
     const ASSET_BASE =
       location.protocol === 'https:' || location.protocol === 'http:'
-        ? '/v0.2.3-beta'
+        ? '/v0.2.10'
         : '.';
 
     /**
@@ -153,17 +165,28 @@
       const raw = hash.get('cfg') ?? query.get('cfg');
       if (!raw) return { config: { type: 'custom:geo-clock-card' } };
 
+      // URLSearchParams already percent-decoded raw AND turned `+`
+      // into spaces — but standard base64 contains `+`, and spaces
+      // can't otherwise appear in a base64 payload, so undo that
+      // first. Also accept base64url (- _), which needs no escaping.
+      const b64 = raw.replace(/ /g, '+').replace(/-/g, '+').replace(/_/g, '/');
       // Try base64 first because most callers (Swift app, others)
       // will encode that way to avoid quoting the JSON braces /
-      // quotes in a URL. Fall back to raw URL-encoded JSON for the
-      // hand-built case. The fallback covers BOTH failure shapes:
-      // atob throwing, and atob "succeeding" on raw JSON that
-      // happens to be valid base64 alphabet but decodes to garbage
-      // that then fails JSON.parse.
+      // quotes in a URL. The fallbacks cover the other shapes:
+      // atob throwing, atob "succeeding" on raw JSON that happens to
+      // be valid base64 alphabet but decodes to garbage that fails
+      // JSON.parse, and plain already-decoded JSON (raw was percent-
+      // decoded above, so decodeURIComponent again would double-
+      // decode and throw on any literal `%`).
       try {
-        return JSON.parse(atob(raw));
+        return JSON.parse(atob(b64));
       } catch {
-        /* not base64-encoded JSON — try the URL-encoded form */
+        /* not base64-encoded JSON — try plain JSON */
+      }
+      try {
+        return JSON.parse(raw);
+      } catch {
+        /* not plain JSON — last resort: a legacy double-encoded link */
       }
       try {
         return JSON.parse(decodeURIComponent(raw));
@@ -174,100 +197,31 @@
     }
 
     /**
-     * Walk the incoming config and synthesize a hass stub for any
-     * convenience shortcuts:
-     *   - markers: [{label, latitude, longitude, color}] (no entity)
-     *     → synthetic entity ID per marker
-     *   - centerLatitude + centerLongitude → synthetic centerEntity
-     *   - mainTimeZone → set hass.config.time_zone, force
-     *     mainTimeSource: 'home'
-     *
-     * Returns `{ config, hass }` ready to feed to setConfig() +
-     * the card's hass property. The original config is left alone;
-     * a shallow-cloned copy is mutated.
-     */
-    function expandShortcuts(cfg, hass) {
-      const out = { ...(cfg || {}) };
-      const stub = {
-        config: { ...(hass?.config || {}) },
-        states: { ...(hass?.states || {}) },
-      };
-
-      // mainTimeZone shortcut → push to hass.config.time_zone and
-      // pin mainTimeSource to 'home' (which reads that field).
-      if (typeof out.mainTimeZone === 'string' && out.mainTimeZone) {
-        stub.config.time_zone = out.mainTimeZone;
-        out.mainTimeSource = 'home';
-        delete out.mainTimeZone;
-      }
-
-      // centerLatitude + centerLongitude shortcut → either a fake
-      // entity, or use center:'home' + hass.config.latitude/longitude
-      // depending on what's already set. The simplest path is
-      // hass.config.latitude/longitude because the home centering
-      // mode reads it directly.
-      //
-      // DELIBERATE: this requires BOTH coordinates. The macOS app's
-      // manual-centering mode sends `center: 'longitude'` +
-      // `centerLongitude` only, and that case must fall through to
-      // the card's native center:'longitude' handling untouched —
-      // synthesizing a home from it would re-introduce a phantom
-      // home-marker at the centering point (a bug we fixed). Don't
-      // "improve" this into a longitude-only branch.
-      if (
-        typeof out.centerLatitude === 'number' &&
-        typeof out.centerLongitude === 'number' &&
-        !out.centerEntity
-      ) {
-        stub.config.latitude = out.centerLatitude;
-        stub.config.longitude = out.centerLongitude;
-        if (!out.center) out.center = 'home';
-        // Keep centerLongitude as-is; card uses it for
-        // center:'longitude' mode if center isn't 'home'.
-      }
-
-      // Inline-coordinate markers → synthesize an entity per
-      // marker so the card's hass-based resolution finds them.
-      if (Array.isArray(out.markers)) {
-        out.markers = out.markers.map((m, i) => {
-          if (m.entity) return m;
-          const id = `wallpaper.marker_${i}`;
-          stub.states[id] = {
-            attributes: {
-              latitude: m.latitude,
-              longitude: m.longitude,
-              // `||` not `??`: the Swift app always sends a label
-              // key, sometimes as "" — empty should still fall back.
-              friendly_name: m.label || `Marker ${i + 1}`,
-            },
-          };
-          return {
-            entity: id,
-            label: m.label,
-            color: m.color,
-          };
-        });
-      }
-
-      return { config: out, hass: stub };
-    }
-
-    /**
      * Mount (or remount) the card with the given config + hass.
      * Removes any prior card instance so repeated calls to
      * geoclockConfigure() during a single session don't stack.
+     * expandShortcuts / applyConfig / waitForCardAssets are the
+     * shared headless helpers from geoclock-config.js.
      */
+    // Generation token: geoclockConfigure() can be called again while
+    // a mount is still awaiting the bundle/assets. Without it the
+    // superseded mount keeps running against a detached card and
+    // fires a geoclockReady the embedder then screenshots — capturing
+    // the wrong (or no) frame. Only the latest mount may proceed past
+    // each await.
+    let mountSeq = 0;
+
     async function mountCard(rawConfig, rawHass) {
+      const seq = ++mountSeq;
       try {
-        await import(`${ASSET_BASE}/geo-clock-card.js`);
+        await loadCardBundle(ASSET_BASE);
       } catch (err) {
         console.error('wallpaper: failed to load card bundle', err);
         document.getElementById('stage-error')
           .classList.add('is-visible');
         return;
       }
-
-      const { config, hass } = expandShortcuts(rawConfig, rawHass);
+      if (seq !== mountSeq) return; // superseded while loading
 
       // Remove any previous card so configure() can be called more
       // than once. The stage-error div stays — it's hidden by
@@ -277,13 +231,7 @@
       );
 
       const card = document.createElement('geo-clock-card');
-      card.setConfig({
-        type: 'custom:geo-clock-card',
-        ...config,
-      });
-      // hass goes via property binding (not attribute) so the card
-      // sees the object reference directly.
-      card.hass = hass;
+      const { config } = applyConfig(card, rawConfig, rawHass);
       document.body.appendChild(card);
 
       // Override the card's internal .frame aspect-ratio so the
@@ -291,6 +239,7 @@
       // to 2048/1068. The SVG's preserveAspectRatio="xMidYMid slice"
       // handles the crop for whatever aspect the embedder mounts at.
       await card.updateComplete?.catch(() => {});
+      if (seq !== mountSeq) return; // superseded — a newer mount owns the DOM
       const frame = card.shadowRoot?.querySelector('.frame');
       if (frame) {
         frame.style.aspectRatio = 'auto';
@@ -310,6 +259,7 @@
       // to the old timing instead of hanging the pipeline — the
       // embedder's own watchdog stays the final backstop.
       await waitForCardAssets(card, config, 8000);
+      if (seq !== mountSeq) return; // superseded — don't fire a stale ready
 
       // Signal "card is mounted and painted" so embedders driving
       // the screenshot loop know when it's safe to call
@@ -320,67 +270,6 @@
         window.webkit?.messageHandlers?.geoclockReady?.postMessage('ready');
       } catch {}
       window.dispatchEvent(new CustomEvent('geoclock-ready'));
-    }
-
-    /**
-     * Resolve when the card's imagery has decoded and (when the
-     * boundary overlay is enabled) the TZ polygons have rendered,
-     * or after `timeoutMs` — whichever comes first.
-     *
-     * Imagery: collect the distinct hrefs from the SVG <image>
-     * elements and decode them through Image() — same URL, same
-     * HTTP cache entry, so this resolves as soon as the bytes the
-     * SVG needs are actually decodable.
-     *
-     * TZ overlay: the card inserts .tz-region paths only after its
-     * async JSON fetch lands, so poll the shadow root for them.
-     */
-    async function waitForCardAssets(card, config, timeoutMs) {
-      const deadline = Date.now() + timeoutMs;
-      const sr = card.shadowRoot;
-      if (!sr) return;
-
-      const hrefs = new Set();
-      sr.querySelectorAll('svg image').forEach((im) => {
-        const h = im.getAttribute('href');
-        if (h) hrefs.add(h);
-      });
-      const imageWaits = [...hrefs].map((h) => {
-        const img = new Image();
-        img.src = h;
-        return img.decode().catch(() => {});
-      });
-
-      const wantTz = config?.showTimezoneBoundaries !== false;
-      const tzWait = wantTz
-        ? (async () => {
-            while (Date.now() < deadline) {
-              if (sr.querySelector('.tz-region, .tz-iana-region')) return;
-              await new Promise((r) => setTimeout(r, 100));
-            }
-          })()
-        : Promise.resolve();
-
-      await Promise.race([
-        Promise.all([...imageWaits, tzWait]),
-        new Promise((r) => setTimeout(r, timeoutMs)),
-      ]);
-      // One more beat so the decoded bitmaps are composited
-      // before the embedder snapshots. requestAnimationFrame
-      // alone would be ideal — but in an OFFSCREEN WKWebView
-      // (the macOS app's renderer) rAF callbacks never fire (no
-      // display link), and awaiting one hangs the whole ready
-      // signal. Race it against a short timeout so on-screen
-      // browsers get the precise frame boundary and offscreen
-      // embedders fall through after 100 ms.
-      await new Promise((r) => {
-        let done = false;
-        const fin = () => { if (!done) { done = true; r(); } };
-        if (typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(fin);
-        }
-        setTimeout(fin, 100);
-      });
     }
 
     // Programmatic entry point. Swift app calls this via
