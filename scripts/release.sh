@@ -195,11 +195,67 @@ echo "==> Final zip"
 rm "$NOTARY_ZIP"
 ditto -c -k --keepParent "$EXPORTED_APP" "$NOTARY_ZIP"
 
+# --- Screensaver -----------------------------------------------
+
+# The GeoClockSaver .saver ships alongside the app. Bundles don't
+# archive/export like apps — build Release, re-sign explicitly with
+# the Developer ID + hardened runtime + timestamp, then notarize and
+# staple the bundle itself (stapler works on .saver bundles).
+echo "==> Building GeoClockSaver (Release)"
+SAVER_LOG="$BUILD_DIR/xcodebuild-saver.log"
+xcodebuild \
+  -project "$PROJECT" \
+  -scheme GeoClockSaver \
+  -configuration Release \
+  -derivedDataPath "$BUILD_DIR/saver-dd" \
+  DEVELOPMENT_TEAM="$TEAM_ID" \
+  CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+  CODE_SIGN_STYLE=Manual \
+  build > "$SAVER_LOG" 2>&1 || {
+    echo "ERROR: saver build failed — see $SAVER_LOG" >&2
+    grep -E "error:" "$SAVER_LOG" | head -10 >&2
+    exit 1
+  }
+readonly SAVER_BUNDLE="$BUILD_DIR/saver-dd/Build/Products/Release/GeoClockSaver.saver"
+if [[ ! -d "$SAVER_BUNDLE" ]]; then
+  echo "ERROR: $SAVER_BUNDLE missing (see $SAVER_LOG)." >&2
+  exit 1
+fi
+
+echo "==> Signing saver"
+codesign --force --timestamp --options runtime \
+  --sign "$SIGNING_IDENTITY" "$SAVER_BUNDLE"
+
+echo "==> Notarizing saver"
+readonly SAVER_ZIP="$BUILD_DIR/GeoClockSaver.saver.zip"
+ditto -c -k --keepParent "$SAVER_BUNDLE" "$SAVER_ZIP"
+SAVER_NOTARY_LOG="$BUILD_DIR/notarytool-saver.log"
+xcrun notarytool submit "$SAVER_ZIP" \
+  --keychain-profile "$NOTARY_PROFILE" \
+  --wait | tee "$SAVER_NOTARY_LOG"
+if ! grep -q "status: Accepted" "$SAVER_NOTARY_LOG"; then
+  echo "ERROR: saver notarization not accepted — fetching notary log" >&2
+  SUBMISSION_ID="$(grep -m1 "id:" "$SAVER_NOTARY_LOG" | awk '{print $2}')"
+  if [[ -n "$SUBMISSION_ID" ]]; then
+    xcrun notarytool log "$SUBMISSION_ID" \
+      --keychain-profile "$NOTARY_PROFILE" >&2 || true
+  fi
+  exit 1
+fi
+
+echo "==> Stapling saver"
+xcrun stapler staple "$SAVER_BUNDLE"
+xcrun stapler validate "$SAVER_BUNDLE"
+rm "$SAVER_ZIP"
+ditto -c -k --keepParent "$SAVER_BUNDLE" "$SAVER_ZIP"
+
 echo
 echo "==> Done"
-echo "    App:  $EXPORTED_APP"
-echo "    Zip:  $NOTARY_ZIP"
+echo "    App:   $EXPORTED_APP"
+echo "    Zip:   $NOTARY_ZIP"
+echo "    Saver: $SAVER_ZIP"
 echo
 echo "Verify the signature + notarization:"
 echo "    codesign -dv --verbose=4 '$EXPORTED_APP'"
 echo "    spctl --assess --type execute --verbose '$EXPORTED_APP'"
+echo "    codesign -dv --verbose=4 '$SAVER_BUNDLE'"

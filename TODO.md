@@ -13,6 +13,16 @@ locked in yet.
 
 ## ✅ Done so far
 
+- GeoClockSaver screensaver target: composites the app's published
+  per-display frames (/Users/Shared/GeoClockWallpaper, exported by
+  SaverFrameExporter behind a Settings toggle + sandbox exception)
+  with the same OverlayView clock/marker overlay, live at 1 Hz.
+  The frame feeds `OverlayState.wallpaperImages` exactly like the
+  app's render loop — OverlayView draws the map itself and paints
+  opaque black when that entry is missing, so never try to render
+  the map underneath it. Selector thumbnail from a real frame;
+  release.sh signs + notarizes the .saver alongside the app.
+
 - Project scaffold (XcodeGen, SwiftUI, sandbox, GPL-3.0).
 - Menu-bar status item + Refresh / Pause / Settings / Quit menu.
 - Offscreen WKWebView render pipeline + `geoclock-app://`

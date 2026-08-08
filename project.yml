@@ -23,6 +23,10 @@ settings:
     SUPPORTS_MACCATALYST: NO
     # SwiftUI previews work in 14+ but we set the bar at 13.
     ENABLE_PREVIEWS: YES
+    # One version for every target (app, saver) — release.sh ships
+    # them together and mismatched versions would be a lie.
+    MARKETING_VERSION: '0.1.1-alpha'
+    CURRENT_PROJECT_VERSION: '2'
 
 targets:
   GeoClockWallpaper:
@@ -74,16 +78,75 @@ targets:
         # needed. setDesktopImageURL works inside the sandbox.
         # Reading the user's bookmark of the Pictures folder would
         # need an entitlement, but we never touch it.
+        # Saver frame export: the screensaver runs in Apple's
+        # legacyScreenSaver host, which can read the whole
+        # filesystem except TCC-protected paths — but NOT our
+        # sandbox container (containers are TCC-protected). So we
+        # publish frames to /Users/Shared, which needs this
+        # exception. Fine for Developer ID distribution;
+        # temporary-exceptions only matter for App Store review.
+        com.apple.security.temporary-exception.files.absolute-path.read-write:
+          - /Users/Shared/GeoClockWallpaper/
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: world.geoclock.wallpaper
         PRODUCT_NAME: GeoClockWallpaper
-        MARKETING_VERSION: '0.1.1-alpha'
-        CURRENT_PROJECT_VERSION: '2'
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_HARDENED_RUNTIME: YES
         GENERATE_INFOPLIST_FILE: NO  # we supply our own
+
+  # GeoClock screensaver — a thin .saver bundle that composites the
+  # app's published frames (/Users/Shared/GeoClockWallpaper) with the
+  # SAME SwiftUI overlay the app draws on the desktop. The shared
+  # sources are compiled into both targets rather than split into a
+  # framework: a framework inside a .saver complicates signing and
+  # the legacyScreenSaver host's library validation for zero gain at
+  # this size.
+  GeoClockSaver:
+    type: bundle
+    platform: macOS
+    sources:
+      - path: GeoClockSaver
+        excludes:
+          - Info.plist
+      # thumbnail.png / thumbnail@2x.png — the System Settings
+      # saver-selector grid tile. Without them macOS shows a
+      # generic placeholder. Generated from a real rendered frame.
+      # Listed individually so they land at Contents/Resources/
+      # root (a folder reference would nest them one level down,
+      # where the selector never looks).
+      - path: GeoClockSaver/Resources/thumbnail.png
+        buildPhase: resources
+      - path: GeoClockSaver/Resources/thumbnail@2x.png
+        buildPhase: resources
+      - path: GeoClockWallpaper/OverlayView.swift
+      - path: GeoClockWallpaper/OverlayState.swift
+      - path: GeoClockWallpaper/Projection.swift
+      - path: GeoClockWallpaper/Sun.swift
+      - path: GeoClockWallpaper/WallpaperConfig.swift
+      - path: GeoClockWallpaper/PerDisplaySettings.swift
+      - path: GeoClockWallpaper/DisplayIdentity.swift
+      - path: GeoClockWallpaper/TimezoneResolver.swift
+      - path: GeoClockWallpaper/TimezoneCentroid.swift
+      - path: GeoClockWallpaper/Diagnostics.swift
+      - path: GeoClockWallpaper/SaverShared.swift
+      - path: GeoClockWallpaper/ColorHex.swift
+    dependencies:
+      - sdk: ScreenSaver.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: world.geoclock.saver
+        PRODUCT_NAME: GeoClockSaver
+        WRAPPER_EXTENSION: saver
+        # Keep thumbnail.png/@2x as literal PNGs — the saver
+        # selector doesn't read the combined HiDPI .tiff Xcode
+        # would otherwise produce.
+        COMBINE_HIDPI_IMAGES: NO
+        INFOPLIST_FILE: GeoClockSaver/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        SKIP_INSTALL: YES
 
   # XCTest target for the pure-logic parts of the app —
   # projection math, sun astronomical formulas, the
@@ -107,6 +170,15 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
 
 schemes:
+  GeoClockSaver:
+    build:
+      targets:
+        GeoClockSaver: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
   GeoClockWallpaper:
     build:
       targets:

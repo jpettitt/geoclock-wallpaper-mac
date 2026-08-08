@@ -416,6 +416,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     overlayState.menuBarHeight = Double(
       WallpaperRenderer.maxMenuBarHeight())
 
+    // Keep the screensaver's shared copy of the overlay config in
+    // step with every wallpaper update; tear the directory down
+    // when the user turns the feature off.
+    if config.config.saverExportEnabled {
+      SaverFrameExporter.exportConfig(
+        config.config, homeCoordinate: overlayState.homeCoordinate)
+    } else {
+      SaverFrameExporter.removeAll()
+    }
+
     // Build the per-screen render plan. Skip displays the user
     // has disabled in Settings; their overlay window stays
     // empty (black background) and no CLGeocoder / WKWebView
@@ -527,6 +537,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // the render failed.
         self.overlayState.wallpaperImages[target.displayID] = output.image
         self.overlayState.centerLonsByDisplay[target.displayID] = payload.centerLon
+        if self.config.config.saverExportEnabled {
+          SaverFrameExporter.exportFrame(
+            output,
+            displayUUID: target.displayUUID,
+            centerLon: payload.centerLon)
+        }
       case .failure(let error):
         Diagnostics.log(
           "  render failed '\(target.label)' — \(error)")

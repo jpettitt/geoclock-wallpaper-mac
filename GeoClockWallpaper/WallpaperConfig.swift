@@ -146,6 +146,13 @@ struct WallpaperConfig: Codable, Equatable {
   /// `resolved(forDisplay:)`.
   var perDisplayEnabled: Bool = false
 
+  /// Publish each display's rendered frame + this config to
+  /// /Users/Shared/GeoClockWallpaper/ for the GeoClock screensaver.
+  /// On by default: the saver silently shows a hint screen until the
+  /// app has published at least one frame, which is a worse first-run
+  /// than an unused 1–2 MB/display of world-readable PNG.
+  var saverExportEnabled: Bool = true
+
   /// Per-display setting overrides, keyed by display UUID
   /// string. Missing keys = inherit the global config wholesale.
   /// Present keys override only the fields the user explicitly
@@ -168,6 +175,7 @@ struct WallpaperConfig: Codable, Equatable {
     case markerDefaultColor, markerDayColor, markerNightColor
     case updateInterval, paused, launchAtStartup, disabledDisplays
     case perDisplayEnabled, perDisplaySettings
+    case saverExportEnabled
   }
 
   init() {}
@@ -210,6 +218,7 @@ struct WallpaperConfig: Codable, Equatable {
     self.launchAtStartup = try c.decodeIfPresent(Bool.self, forKey: .launchAtStartup) ?? d.launchAtStartup
     self.disabledDisplays = try c.decodeIfPresent([String].self, forKey: .disabledDisplays) ?? d.disabledDisplays
     self.perDisplayEnabled = try c.decodeIfPresent(Bool.self, forKey: .perDisplayEnabled) ?? d.perDisplayEnabled
+    self.saverExportEnabled = try c.decodeIfPresent(Bool.self, forKey: .saverExportEnabled) ?? d.saverExportEnabled
     self.perDisplaySettings = try c.decodeIfPresent([String: PerDisplaySettings].self, forKey: .perDisplaySettings) ?? d.perDisplaySettings
   }
 

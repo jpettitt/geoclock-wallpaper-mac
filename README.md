@@ -34,6 +34,19 @@ the menu bar (no Dock icon, `LSUIElement = YES`). Use the menu's
 **Settings…** entry to configure markers, refresh cadence, home
 marker, and aspect-fit mode.
 
+## Screensaver
+
+`GeoClockSaver.saver` turns the same live map into your screensaver:
+per-display frames from the app, plus the identical clock/marker
+overlay ticking at 1 Hz. No web engine — the saver only composites
+what the app publishes to `/Users/Shared/GeoClockWallpaper`
+(Settings → Map → "Publish frames for the GeoClock screensaver",
+on by default; the app must run at least once).
+
+Install: unzip `GeoClockSaver.saver.zip` from the release, double-
+click the `.saver` (or copy it to `~/Library/Screen Savers/`), then
+pick **GeoClock** under System Settings → Screen Saver → Other.
+
 ## Build from source
 
 You'll need [XcodeGen](https://github.com/yonaskolb/XcodeGen) to
