@@ -54,6 +54,12 @@ targets:
         LSUIElement: true   # menu-bar only, no Dock icon
         LSApplicationCategoryType: public.app-category.utilities
         NSHumanReadableCopyright: 'GPL-3.0-or-later © 2026 John Pettitt'
+        # Version keys MUST live here, not hand-edited into the
+        # plist: XcodeGen rewrites this Info.plist on every
+        # `generate`, which silently reverted a hand-fix to a
+        # hardcoded 1.0 (caught in the v0.2.0-alpha release verify).
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # User-visible explanation Apple shows in the location-
         # access prompt. We only ask when the user picks
         # "My location" in Settings.
