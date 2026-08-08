@@ -25,8 +25,8 @@ settings:
     ENABLE_PREVIEWS: YES
     # One version for every target (app, saver) — release.sh ships
     # them together and mismatched versions would be a lie.
-    MARKETING_VERSION: '0.1.1-alpha'
-    CURRENT_PROJECT_VERSION: '2'
+    MARKETING_VERSION: '0.2.0-alpha'
+    CURRENT_PROJECT_VERSION: '3'
 
 targets:
   GeoClockWallpaper:
