@@ -95,9 +95,11 @@ locked in yet.
   iterate displays) and pick the largest backing-store pixel
   size so 6K Pro Display owners get a sharp render and 1080p
   laptops aren't paying for 5K-worth of GPU work.
-- ⏳ **Apply on display reconfiguration.** Subscribe to
-  `NSApplication.didChangeScreenParametersNotification` and
-  re-apply on display attach / detach.
+- ✅ **Apply on display reconfiguration.** AppDelegate observes
+  `NSApplication.didChangeScreenParametersNotification` (debounced
+  2 s — it fires in bursts while geometry settles) and re-renders.
+  Before this, a replugged monitor showed the overlay over the
+  black fallback until the next scheduler tick.
 - ⏳ **Active Space change re-apply.** macOS sometimes loses
   the wallpaper on Space switch. Hook
   `NSWorkspace.activeSpaceDidChangeNotification`.

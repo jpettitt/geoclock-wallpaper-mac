@@ -179,6 +179,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       .sink { LaunchAtLogin.setEnabled($0) }
       .store(in: &cancellables)
 
+    // Render on display hot-plug / resolution change. OverlayLayer
+    // rebuilds its windows off this same notification, so the
+    // overlay appeared instantly on a replugged monitor while its
+    // map sat on the black fallback until the next scheduler tick
+    // (minutes at default cadence). Debounced: the notification
+    // fires in bursts while display geometry settles, and one
+    // render chain covers every screen anyway. Pause wins, same
+    // as the wake observer and the config-edit pipeline.
+    NotificationCenter.default.publisher(
+      for: NSApplication.didChangeScreenParametersNotification)
+      .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
+      .sink { [weak self] _ in
+        guard let self = self, !self.config.config.paused else { return }
+        Diagnostics.log("screen parameters changed — re-rendering")
+        self.updateWallpaper()
+      }
+      .store(in: &cancellables)
+
     // First wallpaper draw on launch — don't wait for the first
     // timer tick. Errors here just log; the next tick will retry.
     updateWallpaper()
