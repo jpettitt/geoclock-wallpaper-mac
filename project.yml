@@ -4,6 +4,15 @@
 # truth for everything Xcode would otherwise keep in opaque XML.
 
 name: GeoClockWallpaper
+
+# Release-MAS: Release plus App Store signing/entitlement overrides
+# (see the app target's settings.configs block). scripts/
+# release-mas.sh archives with it; nothing else should.
+configs:
+  Debug: debug
+  Release: release
+  Release-MAS: release
+
 options:
   bundleIdPrefix: world.geoclock
   deploymentTarget:
@@ -69,30 +78,16 @@ targets:
           time zone's centroid instead.
         # No transit declaration since the only network use is
         # loading https://geoclock.world (TLS, public).
-    entitlements:
-      path: GeoClockWallpaper/GeoClockWallpaper.entitlements
-      properties:
-        com.apple.security.app-sandbox: true
-        # Core Location access — needed in addition to the
-        # Info.plist usage description on sandboxed Mac apps.
-        # The user still has to grant permission in the prompt.
-        com.apple.security.personal-information.location: true
-        # Outbound network only — we hit geoclock.world / R2.
-        com.apple.security.network.client: true
-        # Read-write into ~/Library/Application Support/<bundle>
-        # is granted by default in the sandbox; no entitlement
-        # needed. setDesktopImageURL works inside the sandbox.
-        # Reading the user's bookmark of the Pictures folder would
-        # need an entitlement, but we never touch it.
-        # Saver frame export: the screensaver runs in Apple's
-        # legacyScreenSaver host, which can read the whole
-        # filesystem except TCC-protected paths — but NOT our
-        # sandbox container (containers are TCC-protected). So we
-        # publish frames to /Users/Shared, which needs this
-        # exception. Fine for Developer ID distribution;
-        # temporary-exceptions only matter for App Store review.
-        com.apple.security.temporary-exception.files.absolute-path.read-write:
-          - /Users/Shared/GeoClockWallpaper/
+        # App Store export compliance: only encryption is TLS via
+        # system libraries — exempt. Declaring it here skips the
+        # compliance questionnaire on every upload.
+        ITSAppUsesNonExemptEncryption: false
+    # Entitlements are two hand-maintained files, not an XcodeGen
+    # `entitlements:` block — that block stamps its path into EVERY
+    # configuration, silently clobbering the Release-MAS override
+    # below (caught by release-mas.sh's entitlement check).
+    #   GeoClockWallpaper.entitlements      — Developer ID (direct)
+    #   GeoClockWallpaper-MAS.entitlements  — Mac App Store
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: world.geoclock.wallpaper
@@ -101,6 +96,13 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_HARDENED_RUNTIME: YES
         GENERATE_INFOPLIST_FILE: NO  # we supply our own
+        CODE_SIGN_ENTITLEMENTS: GeoClockWallpaper/GeoClockWallpaper.entitlements
+      configs:
+        # Mac App Store build: swap in the entitlements without the
+        # /Users/Shared temporary-exception (review rejects those —
+        # the powerbox flow in SaverAccess.swift replaces it).
+        Release-MAS:
+          CODE_SIGN_ENTITLEMENTS: GeoClockWallpaper/GeoClockWallpaper-MAS.entitlements
 
   # GeoClock screensaver — a thin .saver bundle that composites the
   # app's published frames (/Users/Shared/GeoClockWallpaper) with the

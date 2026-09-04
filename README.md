@@ -44,7 +44,9 @@ what the app publishes to `/Users/Shared/GeoClockWallpaper`
 (Settings → Map → "Publish frames for the GeoClock screensaver",
 on by default; the app must run at least once).
 
-Install: unzip `GeoClockSaver.saver.zip` from the release, double-
+Install: click **Install screensaver…** in Settings → Map (grants
+folder access, starts publishing, and opens the download page), or
+manually: unzip `GeoClockSaver.saver.zip` from the release, double-
 click the `.saver` (or copy it to `~/Library/Screen Savers/`), then
 pick **GeoClock** under System Settings → Screen Saver → Other.
 
@@ -66,6 +68,18 @@ the `GeoClockWallpaper` scheme, and ⌘R to run.
 When the app launches it appears as a 🌍 in the menu bar
 (no Dock icon — `LSUIElement = YES`). First wallpaper render takes
 ~5–10 s after the bundle and NASA imagery download from R2.
+
+## Mac App Store build
+
+`scripts/release-mas.sh` produces an App Store `.pkg`: configuration
+`Release-MAS`, signed with Apple Distribution, no notarization
+(review replaces it). The MAS entitlements
+(`GeoClockWallpaper-MAS.entitlements`) drop the `/Users/Shared`
+temporary-exception App Review rejects; instead the app asks the
+user to grant that folder once via an open panel and persists a
+security-scoped bookmark (`SaverAccess.swift`). Direct-download
+builds keep the entitlement and never prompt. Not yet published to
+the store.
 
 ## Architecture
 

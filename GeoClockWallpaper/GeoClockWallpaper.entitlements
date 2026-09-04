@@ -2,6 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Developer ID (direct-download) entitlements. Hand-maintained
+	     alongside GeoClockWallpaper-MAS.entitlements — which config
+	     uses which is wired in project.yml.
+	     Location: needed in addition to the Info.plist usage string
+	     on sandboxed Mac apps; the user still gets the prompt.
+	     Network: outbound only, geoclock.world / R2.
+	     Temporary-exception: saver frame export. The screensaver
+	     runs in Apple's legacyScreenSaver host, which can read the
+	     whole filesystem except TCC-protected paths — but NOT our
+	     sandbox container (containers are TCC-protected). So frames
+	     publish to /Users/Shared, which needs this exception. Fine
+	     for Developer ID; App Review rejects it, hence the MAS
+	     file's powerbox pair instead. -->
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
 	<key>com.apple.security.network.client</key>

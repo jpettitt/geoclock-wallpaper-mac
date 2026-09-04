@@ -19,10 +19,31 @@ import CoreLocation
 /// rendering must never fail because the shared dir is unwritable.
 enum SaverFrameExporter {
 
+  /// Log the missing-grant state once per launch, not once per
+  /// frame — a MAS install that never enables the screensaver
+  /// would otherwise spam the log every refresh.
+  private static var loggedNoAccess = false
+
+  /// The MAS build has no entitlement for /Users/Shared; writes
+  /// only work after the user grants access (SaverAccess). Without
+  /// it every export is a silent no-op — Settings surfaces the
+  /// pending grant, rendering must not care.
+  private static func hasAccess() -> Bool {
+    guard SaverAccess.ensureAccess() else {
+      if !loggedNoAccess {
+        loggedNoAccess = true
+        Diagnostics.log("saver export: no access to /Users/Shared (grant pending) — skipping")
+      }
+      return false
+    }
+    return true
+  }
+
   static func exportConfig(
     _ config: WallpaperConfig,
     homeCoordinate: CLLocationCoordinate2D?
   ) {
+    guard hasAccess() else { return }
     let payload = SaverShared.SaverConfig(
       exportedAt: Date(),
       config: config,
@@ -43,6 +64,7 @@ enum SaverFrameExporter {
     displayUUID: String,
     centerLon: Double
   ) {
+    guard hasAccess() else { return }
     do {
       try FileManager.default.createDirectory(
         at: SaverShared.framesDir, withIntermediateDirectories: true)
@@ -79,7 +101,10 @@ enum SaverFrameExporter {
   /// off — the whole point of the toggle is "stop leaving frames
   /// in a world-readable location".
   static func removeAll() {
-    guard FileManager.default.fileExists(atPath: SaverShared.root.path)
+    // Access check first: without it, fileExists is sandbox-denied
+    // and indistinguishable from "already gone".
+    guard hasAccess(),
+          FileManager.default.fileExists(atPath: SaverShared.root.path)
     else { return }
     do {
       try FileManager.default.removeItem(at: SaverShared.root)

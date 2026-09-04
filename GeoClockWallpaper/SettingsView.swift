@@ -95,13 +95,63 @@ private struct MapSettingsTab: View {
 
       Section("Screensaver") {
         Toggle("Publish frames for the GeoClock screensaver",
-               isOn: $store.config.saverExportEnabled)
+               isOn: saverExportBinding)
+        // MAS build, toggle restored as on (e.g. settings carried
+        // over from a Developer ID install) but no folder grant
+        // yet: exports silently no-op, so say so instead of
+        // looking enabled while doing nothing.
+        if store.config.saverExportEnabled && !hasSaverAccess {
+          HStack {
+            Text("Waiting for access to the shared folder.")
+              .foregroundStyle(.orange)
+            Button("Grant Access…") {
+              _ = SaverAccess.requestAccessInteractively()
+              hasSaverAccess = SaverAccess.ensureAccess()
+            }
+          }
+          .font(.caption)
+        }
+        Button("Install screensaver…") { installSaver() }
         Text("Copies each display's rendered map to /Users/Shared/GeoClockWallpaper so the screensaver can show it. Turning this off removes the folder.")
           .font(.caption)
           .foregroundStyle(.secondary)
       }
     }
     .formStyle(.grouped)
+    .onAppear { hasSaverAccess = SaverAccess.ensureAccess() }
+  }
+
+  /// SaverAccess isn't observable, so the pending-grant row is
+  /// driven by this snapshot — refreshed on appear and after any
+  /// interactive grant. Defaults true so the warning never
+  /// flashes before onAppear on builds that hold the entitlement.
+  @State private var hasSaverAccess = true
+
+  /// Wraps the raw toggle binding so enabling the feature runs
+  /// the folder-access grant first (a no-op panel-free check on
+  /// builds holding the /Users/Shared entitlement). Cancelling
+  /// the panel leaves the toggle off rather than "on but inert".
+  private var saverExportBinding: Binding<Bool> {
+    Binding(
+      get: { store.config.saverExportEnabled },
+      set: { on in
+        if on && !SaverAccess.requestAccessInteractively() {
+          store.config.saverExportEnabled = false
+          return
+        }
+        store.config.saverExportEnabled = on
+        hasSaverAccess = SaverAccess.ensureAccess()
+      })
+  }
+
+  /// Grant + enable BEFORE opening the download page: frames are
+  /// then already on disk by the time the saver is installed and
+  /// selected, so the user never sees its "no frames" hint screen.
+  private func installSaver() {
+    guard SaverAccess.requestAccessInteractively() else { return }
+    store.config.saverExportEnabled = true
+    hasSaverAccess = true
+    NSWorkspace.shared.open(SaverAccess.saverDownloadURL)
   }
 }
 

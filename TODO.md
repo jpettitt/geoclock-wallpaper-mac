@@ -303,6 +303,20 @@ locked in yet.
 - ✅ **Distribution: Developer ID + DMG.** No App Store for v1.
   Re-evaluate after we ship and see if discoverability matters
   enough to justify the sandbox tightening.
+- ⏳ **Mac App Store submission.** Build side is done: `Release-MAS`
+  config + `GeoClockWallpaper-MAS.entitlements` (powerbox bookmark
+  via SaverAccess.swift replaces the /Users/Shared temporary-
+  exception; one code path, direct builds never prompt),
+  `scripts/release-mas.sh` exports the `.pkg` and refuses archives
+  still carrying a temporary-exception. The saver itself can't ship
+  on MAS (not a product type) — the in-app "Install screensaver…"
+  button grants access, enables publishing, then opens
+  geoclock.world/screensaver.html. Remaining: Apple Distribution +
+  Mac Installer certs, App Store Connect record, privacy labels
+  ("data not collected" — location never leaves the device),
+  screenshots, and deciding the licensing note (sole copyright
+  holder distributes under store terms; GPL stays for everyone
+  else).
 - **What does "Pause" actually do?** Stop the timer, or also
   revert the wallpaper to whatever was there before? The latter
   needs us to capture the original wallpaper URL on first
