@@ -153,6 +153,14 @@ struct WallpaperConfig: Codable, Equatable {
   /// than an unused 1–2 MB/display of world-readable PNG.
   var saverExportEnabled: Bool = true
 
+  /// Paint the map on the desktop (the app's original job). Off =
+  /// "saver-only" mode: the user's regular wallpaper stays, the
+  /// overlay windows come down, but rendering continues so the
+  /// screensaver keeps getting frames — hourly while the saver is
+  /// idle, at `updateInterval` while it runs (AppDelegate watches
+  /// the com.apple.screensaver.didstart/didstop notifications).
+  var desktopEnabled: Bool = true
+
   /// Per-display setting overrides, keyed by display UUID
   /// string. Missing keys = inherit the global config wholesale.
   /// Present keys override only the fields the user explicitly
@@ -175,7 +183,7 @@ struct WallpaperConfig: Codable, Equatable {
     case markerDefaultColor, markerDayColor, markerNightColor
     case updateInterval, paused, launchAtStartup, disabledDisplays
     case perDisplayEnabled, perDisplaySettings
-    case saverExportEnabled
+    case saverExportEnabled, desktopEnabled
   }
 
   init() {}
@@ -219,6 +227,7 @@ struct WallpaperConfig: Codable, Equatable {
     self.disabledDisplays = try c.decodeIfPresent([String].self, forKey: .disabledDisplays) ?? d.disabledDisplays
     self.perDisplayEnabled = try c.decodeIfPresent(Bool.self, forKey: .perDisplayEnabled) ?? d.perDisplayEnabled
     self.saverExportEnabled = try c.decodeIfPresent(Bool.self, forKey: .saverExportEnabled) ?? d.saverExportEnabled
+    self.desktopEnabled = try c.decodeIfPresent(Bool.self, forKey: .desktopEnabled) ?? d.desktopEnabled
     self.perDisplaySettings = try c.decodeIfPresent([String: PerDisplaySettings].self, forKey: .perDisplaySettings) ?? d.perDisplaySettings
   }
 

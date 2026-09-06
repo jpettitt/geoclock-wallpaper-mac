@@ -133,6 +133,12 @@ final class OverlayState: ObservableObject {
   /// multiple monitors are connected.
   @Published var disabledDisplays: Set<String> = []
 
+  /// Mirrors `WallpaperConfig.desktopEnabled`. False = saver-only
+  /// mode: `OverlayLayer` tears down every desktop window while
+  /// rendering continues for the screensaver. (The saver target
+  /// compiles this file too and simply never reads the flag.)
+  @Published var desktopEnabled: Bool = true
+
   /// Full snapshot of the latest `WallpaperConfig`. Mirrors the
   /// individual flat `@Published` fields above (kept for
   /// readability in views that don't need the per-display
@@ -188,6 +194,7 @@ final class OverlayState: ObservableObject {
     homeDayColor = cfg.homeDayColor
     homeNightColor = cfg.homeNightColor
     disabledDisplays = Set(cfg.disabledDisplays)
+    desktopEnabled = cfg.desktopEnabled
     clockPosition = cfg.clockPosition
     clockSource = cfg.clockSource
     manualTimezone = cfg.manualTimezone

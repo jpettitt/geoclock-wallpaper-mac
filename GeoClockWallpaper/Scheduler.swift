@@ -27,6 +27,21 @@ final class Scheduler {
     self.onFire = onFire
   }
 
+  /// The cadence the app should actually run at. With the desktop
+  /// off (saver-only mode) there's nobody looking at the frames
+  /// unless the screensaver is up, so idle drops to hourly — just
+  /// enough that a saver kicking in shows a not-too-stale
+  /// terminator until the immediate saver-start render lands.
+  /// Pure so it's unit-testable; AppDelegate owns the inputs.
+  static func effectiveInterval(
+    configured: TimeInterval,
+    desktopEnabled: Bool,
+    saverRunning: Bool
+  ) -> TimeInterval {
+    if desktopEnabled || saverRunning { return configured }
+    return 3600
+  }
+
   func start() {
     scheduleTimer()
     registerWakeObserver()

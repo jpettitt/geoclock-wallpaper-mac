@@ -68,17 +68,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       onFire: { [weak self] in self?.updateWallpaper() }
     )
 
-    // Re-fire whenever the user changes the interval. The Combine
-    // pipeline projects out individual fields from the typed
-    // config so we only react to the field the scheduler cares
-    // about, not every unrelated edit.
+    // Re-fire whenever the user changes the interval OR flips
+    // desktop mode. The pipeline projects out just the fields the
+    // cadence depends on, not every unrelated edit; the third
+    // cadence input (saverIsRunning) arrives via the distributed
+    // notifications below.
     config.$config
-      .map(\.updateInterval)
+      .map { [$0.updateInterval as Int, $0.desktopEnabled ? 1 : 0] }
       .removeDuplicates()
-      .sink { [weak self] newValue in
-        self?.scheduler.setInterval(TimeInterval(newValue))
-      }
+      .sink { [weak self] _ in self?.applyEffectiveInterval() }
       .store(in: &cancellables)
+
+    // Saver-only cadence: hourly while the screensaver is idle,
+    // full speed while it runs. ScreenSaverEngine broadcasts these
+    // on every start/stop; delivery is best-effort, so a missed
+    // didstop just means one cycle at the faster cadence.
+    let dnc = DistributedNotificationCenter.default()
+    dnc.addObserver(
+      forName: .init("com.apple.screensaver.didstart"),
+      object: nil, queue: .main
+    ) { [weak self] _ in
+      guard let self = self else { return }
+      Diagnostics.log("screensaver started")
+      self.saverIsRunning = true
+      self.applyEffectiveInterval()
+      // In saver-only mode the newest frame can be an hour old —
+      // render now; the saver re-reads its files every ~15 s, so
+      // the fresh frame appears mid-run.
+      if !self.config.config.desktopEnabled && !self.config.config.paused {
+        self.updateWallpaper()
+      }
+    }
+    dnc.addObserver(
+      forName: .init("com.apple.screensaver.didstop"),
+      object: nil, queue: .main
+    ) { [weak self] _ in
+      guard let self = self else { return }
+      Diagnostics.log("screensaver stopped")
+      self.saverIsRunning = false
+      self.applyEffectiveInterval()
+    }
 
     config.$config
       .map(\.paused)
@@ -404,6 +433,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private var updateChainActive = false
   private var updateRerunRequested = false
 
+  /// Whether the screensaver is currently on glass, per the
+  /// com.apple.screensaver.didstart/didstop notifications. Only
+  /// consulted for cadence — never for correctness.
+  private var saverIsRunning = false
+
+  /// Push the current cadence (interval × desktop mode × saver
+  /// state) into the scheduler.
+  private func applyEffectiveInterval() {
+    scheduler.setInterval(Scheduler.effectiveInterval(
+      configured: TimeInterval(config.updateInterval),
+      desktopEnabled: config.config.desktopEnabled,
+      saverRunning: saverIsRunning))
+  }
+
   /// Render the wallpaper once per connected (and enabled)
   /// display, then hand each image to the overlay layer keyed
   /// by `CGDirectDisplayID`. Renders are serialised because the
@@ -442,6 +485,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         config.config, homeCoordinate: overlayState.homeCoordinate)
     } else {
       SaverFrameExporter.removeAll()
+    }
+
+    // Desktop off AND saver export off = nothing consumes frames;
+    // skip the render chain entirely. Placed after applyConfig
+    // (so OverlayLayer still reacts to the desktop toggle) and
+    // after the export sync (so flipping the saver off still
+    // removes the shared folder).
+    guard config.config.desktopEnabled || config.config.saverExportEnabled else {
+      Diagnostics.log("  no consumers (desktop off, saver export off) — skipping render")
+      updateChainActive = false
+      return
     }
 
     // Build the per-screen render plan. Skip displays the user

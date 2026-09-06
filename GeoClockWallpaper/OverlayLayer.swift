@@ -27,6 +27,7 @@ final class OverlayLayer {
   private var windowsByDisplay: [CGDirectDisplayID: NSWindow] = [:]
   private var screenObserver: NSObjectProtocol?
   private var disabledObserver: AnyCancellable?
+  private var desktopObserver: AnyCancellable?
 
   init(state: OverlayState) {
     self.state = state
@@ -49,6 +50,13 @@ final class OverlayLayer {
       .dropFirst()
       .receive(on: DispatchQueue.main)
       .sink { [weak self] _ in self?.rebuildWindows() }
+    // Saver-only mode: same rebuild path, the enabled-screen list
+    // just comes up empty (see rebuildWindows).
+    desktopObserver = state.$desktopEnabled
+      .removeDuplicates()
+      .dropFirst()
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self] _ in self?.rebuildWindows() }
   }
 
   deinit {
@@ -64,7 +72,9 @@ final class OverlayLayer {
   /// resolution changed); windows for removed OR newly-disabled
   /// displays are torn down.
   private func rebuildWindows() {
-    let enabledScreens = NSScreen.screens.filter { screen in
+    // Saver-only mode: no desktop windows at all — the empty list
+    // makes the stale-window sweep below tear everything down.
+    let enabledScreens = !state.desktopEnabled ? [] : NSScreen.screens.filter { screen in
       guard let uuid = DisplayIdentity.uuidString(of: screen)
       else { return true }  // unknown identity → render anyway
       return !state.disabledDisplays.contains(uuid)

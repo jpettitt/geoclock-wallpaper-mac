@@ -100,6 +100,38 @@ final class WallpaperConfigTests: XCTestCase {
                    WallpaperConfig.defaults.launchAtStartup)
   }
 
+  func testWallpaperConfig_desktopEnabledDefaultsOnAndRoundtrips() throws {
+    // Pre-saver-only configs lack the key → desktop stays on.
+    let legacy = try decoder.decode(
+      WallpaperConfig.self, from: "{}".data(using: .utf8)!)
+    XCTAssertTrue(legacy.desktopEnabled)
+
+    var c = WallpaperConfig()
+    c.desktopEnabled = false
+    let redecoded = try decoder.decode(
+      WallpaperConfig.self, from: JSONEncoder().encode(c))
+    XCTAssertFalse(redecoded.desktopEnabled)
+  }
+
+  // MARK: – Saver-only cadence
+
+  func testEffectiveInterval_desktopOnUsesConfigured() {
+    XCTAssertEqual(Scheduler.effectiveInterval(
+      configured: 300, desktopEnabled: true, saverRunning: false), 300)
+    XCTAssertEqual(Scheduler.effectiveInterval(
+      configured: 300, desktopEnabled: true, saverRunning: true), 300)
+  }
+
+  func testEffectiveInterval_saverOnlyIdleIsHourly() {
+    XCTAssertEqual(Scheduler.effectiveInterval(
+      configured: 300, desktopEnabled: false, saverRunning: false), 3600)
+  }
+
+  func testEffectiveInterval_saverOnlyRunningUsesConfigured() {
+    XCTAssertEqual(Scheduler.effectiveInterval(
+      configured: 300, desktopEnabled: false, saverRunning: true), 300)
+  }
+
   // MARK: – resolved(forDisplay:)
 
   func testResolved_unmodifiedWhenPerDisplayOff() {

@@ -93,6 +93,18 @@ private struct MapSettingsTab: View {
         Toggle("Hour-of-day band", isOn: $store.config.showTimezoneBand)
       }
 
+      Section("Desktop") {
+        Toggle("Show map on the desktop", isOn: $store.config.desktopEnabled)
+        if !store.config.desktopEnabled {
+          Text(store.config.saverExportEnabled
+            ? "Saver-only mode: your regular wallpaper shows; the map renders hourly for the screensaver and at full cadence while it runs."
+            : "Desktop and screensaver publishing are both off — nothing renders.")
+            .font(.caption)
+            .foregroundStyle(store.config.saverExportEnabled
+              ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
+        }
+      }
+
       Section("Screensaver") {
         Toggle("Publish frames for the GeoClock screensaver",
                isOn: saverExportBinding)

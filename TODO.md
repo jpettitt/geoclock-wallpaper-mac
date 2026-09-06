@@ -303,6 +303,16 @@ locked in yet.
 - ✅ **Distribution: Developer ID + DMG.** No App Store for v1.
   Re-evaluate after we ship and see if discoverability matters
   enough to justify the sandbox tightening.
+- ✅ **Saver-only mode** (2026-09-05). `desktopEnabled` config flag:
+  off = OverlayLayer tears down all desktop windows (same rebuild
+  path as disabledDisplays) while rendering continues for the
+  saver. Cadence via `Scheduler.effectiveInterval`: hourly idle,
+  `updateInterval` while the saver runs — detected by the
+  `com.apple.screensaver.didstart/didstop` distributed
+  notifications (verified delivered on Sequoia; best-effort by
+  design, a missed didstop just means one fast cycle). didstart
+  also fires an immediate render in saver-only mode so the
+  up-to-hour-old frame refreshes mid-run.
 - ⏳ **Mac App Store submission.** Build side is done: `Release-MAS`
   config + `GeoClockWallpaper-MAS.entitlements` (powerbox bookmark
   via SaverAccess.swift replaces the /Users/Shared temporary-

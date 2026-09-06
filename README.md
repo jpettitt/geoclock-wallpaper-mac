@@ -44,6 +44,12 @@ what the app publishes to `/Users/Shared/GeoClockWallpaper`
 (Settings → Map → "Publish frames for the GeoClock screensaver",
 on by default; the app must run at least once).
 
+Prefer keeping your own desktop wallpaper? Turn off Settings →
+Map → **Show map on the desktop**: saver-only mode leaves the
+desktop alone and renders hourly for the screensaver (full cadence
+while it's running — the app watches the system's screensaver
+start/stop notifications).
+
 Install: click **Install screensaver…** in Settings → Map (grants
 folder access, starts publishing, and opens the download page), or
 manually: unzip `GeoClockSaver.saver.zip` from the release, double-
